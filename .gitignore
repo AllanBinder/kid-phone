@@ -1,0 +1,7 @@
+.secrets.env
+.pio/
+build/
+sdkconfig.old
+managed_components/
+sdkconfig.esp32s3
+.vscode/
