@@ -22,7 +22,7 @@
 #define APP_BLOCK_MS            10
 
 /* Earpiece volume (0..100, normalized by the driver to the device dB range). */
-#define APP_SPK_VOLUME_PCT      60
+#define APP_SPK_VOLUME_PCT      100
 /* Mic volume, only applied if the device exposes a mic volume control. */
 #define APP_MIC_VOLUME_PCT      80
 
