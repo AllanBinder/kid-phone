@@ -8,19 +8,22 @@
 :root {
   --bg: #f6f4ef; --card: #ffffff; --ink: #1f2328; --muted: #5f6670; --line: #e3dfd6;
   --accent: #2f6f4f; --accent-ink: #ffffff; --warn: #9a3412; --warn-bg: #fff1e6; --ok: #2f6f4f;
+  --chip: #eef4f0;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #15171a; --card: #1e2125; --ink: #e8e6e1; --muted: #a0a6ad; --line: #30343a;
     --accent: #5fb98a; --accent-ink: #0d1a13; --warn: #fdba74; --warn-bg: #2a1d12; --ok: #5fb98a;
+    --chip: #1d2a23;
   }
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--ink);
   font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
-main { max-width: 560px; margin: 0 auto; padding: 24px 16px 48px; }
+main { max-width: 600px; margin: 0 auto; padding: 24px 16px 48px; }
 h1 { font-size: 26px; margin: 8px 0 4px; }
 h2 { font-size: 18px; margin: 0 0 12px; }
+h3 { font-size: 16px; margin: 0; }
 p { margin: 8px 0; }
 .sub { color: var(--muted); margin: 0 0 20px; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin: 0 0 16px; }
@@ -32,60 +35,90 @@ p { margin: 8px 0; }
 .bad { color: var(--warn); font-weight: 600; }
 label { display: block; font-weight: 600; margin: 14px 0 4px; }
 .hint { color: var(--muted); font-size: 14px; margin: 2px 0 0; }
-input { width: 100%; font: inherit; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
+.small { color: var(--muted); font-size: 13px; }
+input, select { width: 100%; font: inherit; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
   background: var(--bg); color: var(--ink); }
-input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 button { font: inherit; font-weight: 600; padding: 10px 18px; border-radius: 8px; border: 1px solid var(--accent);
   background: var(--accent); color: var(--accent-ink); cursor: pointer; margin: 14px 8px 0 0; }
 button.secondary { background: transparent; color: var(--accent); }
+button.mini { padding: 4px 10px; font-size: 14px; margin: 8px 6px 0 0; }
 button:disabled { opacity: 0.5; cursor: default; }
 ol { padding-left: 20px; margin: 8px 0; }
 #log { list-style: none; padding: 0; margin: 0; }
 #log li { padding: 4px 0 4px 22px; position: relative; }
 #log li::before { content: "\2713"; position: absolute; left: 0; color: var(--ok); }
 #log li.cur::before { content: "\2022"; color: var(--muted); }
+#log li.warn { color: var(--warn); }
+#log li.warn::before { content: "!"; color: var(--warn); }
 .alert { background: var(--warn-bg); color: var(--warn); border-radius: 8px; padding: 10px 12px; margin: 12px 0 0; }
 .alert b { display: block; }
+.note { background: var(--chip); border-radius: 8px; padding: 10px 12px; margin: 12px 0 0; }
 .hidden { display: none; }
+.contact { border-top: 1px solid var(--line); padding: 14px 0 6px; }
+.contact:first-of-type { border-top: 0; padding-top: 0; }
+.chead { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.chip { font-size: 13px; padding: 2px 8px; border-radius: 999px; background: var(--chip); color: var(--muted); }
+.chip.on { color: var(--ok); font-weight: 600; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px; }
+@media (max-width: 480px) { .two { grid-template-columns: 1fr; } }
+.toggle { display: flex; align-items: center; gap: 10px; font-weight: 600; margin: 14px 0 0; cursor: pointer; }
+.toggle input { width: 20px; height: 20px; margin: 0; }
+.sched { margin: 6px 0 0 30px; }
+@media (max-width: 480px) { .sched { margin-left: 0; } }
+.win { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 8px 0 0; }
+.days { display: flex; flex-wrap: wrap; gap: 4px; }
+.days label { display: inline-flex; align-items: center; gap: 4px; font-weight: 500; margin: 0; padding: 4px 8px;
+  border: 1px solid var(--line); border-radius: 6px; cursor: pointer; font-size: 14px; }
+.days input { width: auto; margin: 0; }
+.times { display: flex; align-items: center; gap: 8px; margin: 8px 0 0; flex-wrap: wrap; }
+.times input { width: 120px; padding: 6px 8px; }
+.times button { margin: 0 0 0 auto; }
+.calls { display: flex; flex-wrap: wrap; }
 footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 24px; }
 </style>
 </head>
 <body>
 <main>
   <h1>Kid Phone</h1>
-  <p class="sub">Set up the phone so it can call family. Everything stays between this phone and your own Twilio account.</p>
+  <p class="sub">Set up who the phone can call. Everything stays between this phone and your own Twilio account.</p>
 
   <section class="card">
     <h2>Status</h2>
     <div class="row"><span>WiFi</span><span id="s-wifi">...</span></div>
     <div class="row"><span>Phone service</span><span id="s-tw">...</span></div>
     <div class="row"><span>Handset</span><span id="s-hs">...</span></div>
-    <div class="row"><span>Calls go to</span><span id="s-to">...</span></div>
+    <div class="row"><span>Clock</span><span id="s-clock">...</span></div>
     <div class="row"><span>Calls come from</span><span id="s-from">...</span></div>
+    <div class="note hidden" id="old-login">This phone still uses the shared login from older software. Press <b>Run setup again</b> below to give it its own.</div>
   </section>
 
-  <section class="card hidden" id="c-form">
-    <h2 id="f-title">Connect to Twilio</h2>
-    <p>The phone uses your Twilio account to make calls. You need an account with one phone number (Twilio charges about $1 a month for the number plus a few cents per minute).</p>
-    <ol>
-      <li>Open <b>console.twilio.com</b> in another tab and log in.</li>
-      <li>On the home page, find <b>Account Info</b>.</li>
-      <li>Copy the <b>Account SID</b> and the <b>Auth Token</b> (click Show first) into the boxes below.</li>
-    </ol>
-    <form id="form" autocomplete="off">
-      <label for="sid">Account SID</label>
-      <input id="sid" name="sid" placeholder="AC..." spellcheck="false" autocapitalize="off" required>
-      <label for="token">Auth Token</label>
-      <input id="token" name="token" type="password" spellcheck="false" autocapitalize="off" required>
-      <p class="hint">Used once to set things up, then forgotten. The phone never stores it.</p>
-      <label for="cname">Who should the phone call?</label>
-      <input id="cname" name="cname" placeholder="Grandma" maxlength="31">
-      <label for="cnum">Their phone number</label>
-      <input id="cnum" name="cnum" type="tel" placeholder="+1 555 123 4567" required>
-      <p class="hint">International format: start with + and the country code, for example +1 555 123 4567 or +84 90 123 4567.</p>
-      <button type="submit" id="b-connect">Connect</button>
-      <button type="button" class="secondary hidden" id="b-cancel">Cancel</button>
-    </form>
+  <section class="card">
+    <h2>Who the phone calls</h2>
+    <p>Each button on the phone calls one person, and the light next to it is on when they can be called. You can fill in one to four.</p>
+    <form id="family" autocomplete="off"></form>
+    <button type="button" id="b-save" class="hidden">Save</button>
+    <p class="hint" id="save-msg"></p>
+  </section>
+
+  <section class="card hidden" id="c-tw">
+    <h2 id="tw-title">Connect to Twilio</h2>
+    <div id="tw-intro">
+      <p>The phone uses your Twilio account to make calls. You need an account with one phone number (Twilio charges about $1 a month for the number plus a few cents per minute).</p>
+      <ol>
+        <li>Open <b>console.twilio.com</b> in another tab and log in.</li>
+        <li>On the home page, find <b>Account Info</b>.</li>
+        <li>Copy the <b>Account SID</b> and the <b>Auth Token</b> (click Show first) into the boxes below.</li>
+      </ol>
+    </div>
+    <p id="tw-why" class="note hidden"></p>
+    <label for="sid">Account SID</label>
+    <input id="sid" placeholder="AC..." spellcheck="false" autocapitalize="off">
+    <label for="token">Auth Token</label>
+    <input id="token" type="password" spellcheck="false" autocapitalize="off">
+    <p class="hint">Used once, then forgotten. The phone never stores it. Changing names or available times later does not need it; adding or changing a phone number does, because Twilio keeps the list of numbers the phone may call.</p>
+    <button type="button" id="b-connect">Connect</button>
+    <button type="button" class="secondary hidden" id="b-tw-cancel">Cancel</button>
   </section>
 
   <section class="card hidden" id="c-progress">
@@ -96,24 +129,137 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
 
   <section class="card hidden" id="c-ready">
     <h2>Try it</h2>
-    <p>Press <b>Test call</b> (or the phone's button) and pick up the handset. The phone calls <span id="r-name">your contact</span>.</p>
-    <button id="b-call">Test call</button>
+    <p>Press a <b>Call</b> button (or the button on the phone) and pick up the handset.</p>
+    <div class="calls" id="call-buttons"></div>
     <button class="secondary" id="b-hang" disabled>Hang up</button>
-    <button class="secondary" id="b-change">Change number</button>
+    <button class="secondary" id="b-rerun">Run setup again</button>
     <p id="call-state" class="hint"></p>
-    <div class="alert hidden" id="call-err"><b id="call-err-t"></b><span id="call-err-h"></span></div>
+    <div class="alert hidden" id="call-err"><b id="call-err-t"></b><span class="small" id="call-err-code"></span></div>
   </section>
 
   <footer>
-    Hold the phone's button for 10 seconds to erase all settings.<br>
+    Hold the phone's first button for 10 seconds to erase all settings.<br>
     <span id="fw"></span>
   </footer>
 </main>
 <script>
 "use strict";
+const ZONES = [
+  ["America/New_York", "US Eastern (New York)", "EST5EDT,M3.2.0,M11.1.0"],
+  ["America/Chicago", "US Central (Chicago)", "CST6CDT,M3.2.0,M11.1.0"],
+  ["America/Denver", "US Mountain (Denver)", "MST7MDT,M3.2.0,M11.1.0"],
+  ["America/Phoenix", "US Arizona (Phoenix, no DST)", "MST7"],
+  ["America/Los_Angeles", "US Pacific (Los Angeles)", "PST8PDT,M3.2.0,M11.1.0"],
+  ["America/Anchorage", "US Alaska (Anchorage)", "AKST9AKDT,M3.2.0,M11.1.0"],
+  ["Pacific/Honolulu", "US Hawaii (Honolulu)", "HST10"],
+  ["America/Puerto_Rico", "Puerto Rico", "AST4"],
+  ["America/Toronto", "Canada Eastern (Toronto, Montreal)", "EST5EDT,M3.2.0,M11.1.0"],
+  ["America/Winnipeg", "Canada Central (Winnipeg)", "CST6CDT,M3.2.0,M11.1.0"],
+  ["America/Regina", "Canada Saskatchewan (Regina)", "CST6"],
+  ["America/Edmonton", "Canada Alberta (Edmonton, Calgary)", "CST6"],
+  ["America/Vancouver", "Canada BC (Vancouver)", "MST7"],
+  ["America/Halifax", "Canada Atlantic (Halifax)", "AST4ADT,M3.2.0,M11.1.0"],
+  ["America/St_Johns", "Canada Newfoundland (St. John's)", "NST3:30NDT,M3.2.0,M11.1.0"],
+  ["America/Mexico_City", "Mexico Central (Mexico City)", "CST6"],
+  ["America/Cancun", "Mexico Southeast (Cancun)", "EST5"],
+  ["America/Hermosillo", "Mexico Sonora (Hermosillo)", "MST7"],
+  ["America/Tijuana", "Mexico Baja California (Tijuana)", "PST8PDT,M3.2.0,M11.1.0"],
+  ["America/Guatemala", "Central America (Guatemala)", "CST6"],
+  ["America/Bogota", "Colombia (Bogota)", "<-05>5"],
+  ["America/Lima", "Peru (Lima)", "<-05>5"],
+  ["America/Caracas", "Venezuela (Caracas)", "<-04>4"],
+  ["America/Santiago", "Chile (Santiago)", "<-04>4<-03>,M9.1.6/24,M4.1.6/24"],
+  ["America/Argentina/Buenos_Aires", "Argentina (Buenos Aires)", "<-03>3"],
+  ["America/Sao_Paulo", "Brazil (Sao Paulo, Rio, Brasilia)", "<-03>3"],
+  ["America/Manaus", "Brazil Amazon (Manaus)", "<-04>4"],
+  ["Europe/London", "UK (London)", "GMT0BST,M3.5.0/1,M10.5.0"],
+  ["Europe/Dublin", "Ireland (Dublin)", "GMT0IST,M3.5.0/1,M10.5.0"],
+  ["Europe/Lisbon", "Portugal (Lisbon)", "WET0WEST,M3.5.0/1,M10.5.0"],
+  ["Europe/Madrid", "Spain (Madrid)", "CET-1CEST,M3.5.0,M10.5.0/3"],
+  ["Europe/Paris", "France (Paris)", "CET-1CEST,M3.5.0,M10.5.0/3"],
+  ["Europe/Brussels", "Belgium (Brussels)", "CET-1CEST,M3.5.0,M10.5.0/3"],
+  ["Europe/Amsterdam", "Netherlands (Amsterdam)", "CET-1CEST,M3.5.0,M10.5.0/3"],
+  ["Europe/Berlin", "Germany (Berlin)", "CET-1CEST,M3.5.0,M10.5.0/3"],
+  ["Europe/Zurich", "Switzerland (Zurich)", "CET-1CEST,M3.5.0,M10.5.0/3"],
+  ["Europe/Vienna", "Austria (Vienna)", "CET-1CEST,M3.5.0,M10.5.0/3"],
+  ["Europe/Rome", "Italy (Rome)", "CET-1CEST,M3.5.0,M10.5.0/3"],
+  ["Europe/Stockholm", "Sweden (Stockholm)", "CET-1CEST,M3.5.0,M10.5.0/3"],
+  ["Europe/Oslo", "Norway (Oslo)", "CET-1CEST,M3.5.0,M10.5.0/3"],
+  ["Europe/Copenhagen", "Denmark (Copenhagen)", "CET-1CEST,M3.5.0,M10.5.0/3"],
+  ["Europe/Warsaw", "Poland (Warsaw)", "CET-1CEST,M3.5.0,M10.5.0/3"],
+  ["Europe/Prague", "Czechia (Prague)", "CET-1CEST,M3.5.0,M10.5.0/3"],
+  ["Europe/Budapest", "Hungary (Budapest)", "CET-1CEST,M3.5.0,M10.5.0/3"],
+  ["Europe/Helsinki", "Finland (Helsinki)", "EET-2EEST,M3.5.0/3,M10.5.0/4"],
+  ["Europe/Athens", "Greece (Athens)", "EET-2EEST,M3.5.0/3,M10.5.0/4"],
+  ["Europe/Bucharest", "Romania (Bucharest)", "EET-2EEST,M3.5.0/3,M10.5.0/4"],
+  ["Europe/Kyiv", "Ukraine (Kyiv)", "EET-2EEST,M3.5.0/3,M10.5.0/4"],
+  ["Europe/Istanbul", "Turkey (Istanbul)", "<+03>-3"],
+  ["Europe/Moscow", "Russia (Moscow)", "MSK-3"],
+  ["Africa/Lagos", "Nigeria (Lagos)", "WAT-1"],
+  ["Africa/Cairo", "Egypt (Cairo)", "EET-2EEST,M4.5.5/0,M10.5.4/24"],
+  ["Africa/Johannesburg", "South Africa (Johannesburg)", "SAST-2"],
+  ["Africa/Nairobi", "Kenya (Nairobi)", "EAT-3"],
+  ["Asia/Jerusalem", "Israel (Jerusalem)", "IST-2IDT,M3.4.4/26,M10.5.0"],
+  ["Asia/Riyadh", "Saudi Arabia (Riyadh)", "<+03>-3"],
+  ["Asia/Dubai", "UAE (Dubai, Abu Dhabi)", "<+04>-4"],
+  ["Asia/Karachi", "Pakistan (Karachi)", "PKT-5"],
+  ["Asia/Kolkata", "India (Delhi, Mumbai)", "IST-5:30"],
+  ["Asia/Kathmandu", "Nepal (Kathmandu)", "<+0545>-5:45"],
+  ["Asia/Dhaka", "Bangladesh (Dhaka)", "<+06>-6"],
+  ["Asia/Bangkok", "Thailand (Bangkok)", "<+07>-7"],
+  ["Asia/Ho_Chi_Minh", "Vietnam (Hanoi, Ho Chi Minh City)", "<+07>-7"],
+  ["Asia/Jakarta", "Indonesia West (Jakarta)", "WIB-7"],
+  ["Asia/Singapore", "Singapore", "<+08>-8"],
+  ["Asia/Kuala_Lumpur", "Malaysia (Kuala Lumpur)", "<+08>-8"],
+  ["Asia/Manila", "Philippines (Manila)", "PST-8"],
+  ["Asia/Shanghai", "China (Beijing, Shanghai)", "CST-8"],
+  ["Asia/Hong_Kong", "Hong Kong", "HKT-8"],
+  ["Asia/Taipei", "Taiwan (Taipei)", "CST-8"],
+  ["Asia/Seoul", "South Korea (Seoul)", "KST-9"],
+  ["Asia/Tokyo", "Japan (Tokyo)", "JST-9"],
+  ["Australia/Perth", "Australia Western (Perth)", "AWST-8"],
+  ["Australia/Darwin", "Australia Northern Territory (Darwin)", "ACST-9:30"],
+  ["Australia/Adelaide", "Australia South (Adelaide)", "ACST-9:30ACDT,M10.1.0,M4.1.0/3"],
+  ["Australia/Brisbane", "Australia Queensland (Brisbane, no DST)", "AEST-10"],
+  ["Australia/Sydney", "Australia NSW (Sydney, Canberra)", "AEST-10AEDT,M10.1.0,M4.1.0/3"],
+  ["Australia/Melbourne", "Australia Victoria (Melbourne)", "AEST-10AEDT,M10.1.0,M4.1.0/3"],
+  ["Australia/Hobart", "Australia Tasmania (Hobart)", "AEST-10AEDT,M10.1.0,M4.1.0/3"],
+  ["Pacific/Auckland", "New Zealand (Auckland)", "NZST-12NZDT,M9.5.0,M4.1.0/3"],
+  ["Etc/UTC", "UTC", "UTC0"],
+];
+/* Older browsers report a few zones by their former names. */
+const ALIASES = {"Asia/Saigon": "Asia/Ho_Chi_Minh", "Asia/Calcutta": "Asia/Kolkata", "Europe/Kiev": "Europe/Kyiv",
+  "America/Buenos_Aires": "America/Argentina/Buenos_Aires", "Asia/Katmandu": "Asia/Kathmandu",
+  "Australia/ACT": "Australia/Sydney", "Australia/Canberra": "Australia/Sydney", "Asia/Rangoon": "Asia/Bangkok",
+  "US/Eastern": "America/New_York", "US/Central": "America/Chicago", "US/Mountain": "America/Denver",
+  "US/Pacific": "America/Los_Angeles", "US/Arizona": "America/Phoenix", "US/Hawaii": "Pacific/Honolulu",
+  "UTC": "Etc/UTC", "Etc/GMT": "Etc/UTC", "GB": "Europe/London"};
+const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const PRESETS = [
+  ["Weekday evenings", 0b0111110, 17 * 60, 20 * 60],
+  ["Weekend mornings", 0b1000001, 9 * 60, 12 * 60],
+  ["Every day, daytime", 0b1111111, 9 * 60, 19 * 60],
+];
+const NSLOTS = 4, NWIN = 4;
+
 const $ = (id) => document.getElementById(id);
 const show = (id, on) => $(id).classList.toggle("hidden", !on);
-let st = null, editing = false, watchSeq = null, pollTimer = null;
+const el = (tag, props, ...kids) => {
+  const e = document.createElement(tag);
+  Object.assign(e, props || {});
+  e.append(...kids);
+  return e;
+};
+let st = null, formSig = null, dirty = false, watchSeq = null, pollTimer = null;
+let twMode = null; /* null | "setup" | "numbers" | "full" */
+let pendingContacts = null;
+
+function browserZone() {
+  let z = "";
+  try { z = Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (e) {}
+  z = ALIASES[z] || z;
+  return ZONES.some((r) => r[0] === z) ? z : "America/New_York";
+}
 
 async function api(path, body) {
   const opt = body === undefined ? {} : {
@@ -122,62 +268,234 @@ async function api(path, body) {
   const r = await fetch(path, opt);
   let j = {};
   try { j = await r.json(); } catch (e) {}
-  return {ok: r.ok, j};
+  return {ok: r.ok, status: r.status, j};
 }
 
 function setText(id, text, cls) {
-  const el = $(id);
-  el.textContent = text;
-  el.className = cls || "";
+  const e = $(id);
+  e.textContent = text;
+  e.className = cls || "";
+}
+
+const hhmm = (m) => String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0");
+const mins = (s) => { const [h, m] = (s || "").split(":").map(Number); return h * 60 + m; };
+
+/* ---------- family form ---------- */
+
+function windowRow(w) {
+  const box = el("div", {className: "win"});
+  const days = el("div", {className: "days"});
+  DAY_NAMES.forEach((d, i) => {
+    const cb = el("input", {type: "checkbox", checked: !!(w.days & (1 << i))});
+    cb.dataset.day = i;
+    days.append(el("label", {}, cb, d));
+  });
+  const from = el("input", {type: "time", value: hhmm(w.start), required: true});
+  const to = el("input", {type: "time", value: hhmm(w.end), required: true});
+  const wrap = el("span", {className: "small"});
+  const upd = () => {
+    const s = mins(from.value), e = mins(to.value);
+    wrap.textContent = e === s ? "(all day)" : e < s ? "(ends the next day)" : "";
+  };
+  from.addEventListener("input", upd);
+  to.addEventListener("input", upd);
+  upd();
+  const rm = el("button", {type: "button", className: "secondary mini", textContent: "Remove"});
+  rm.addEventListener("click", () => { box.remove(); dirty = true; refreshAddButtons(); });
+  box.append(days, el("div", {className: "times"}, "From", from, "to", to, wrap, rm));
+  return box;
+}
+
+function zoneSelect(sched) {
+  const sel = el("select", {});
+  let want = sched.tz_name || "";
+  if (!want || !ZONES.some((r) => r[0] === want)) {
+    const byRule = sched.tz && ZONES.find((r) => r[2] === sched.tz);
+    want = byRule ? byRule[0] : (sched.tz ? "" : browserZone());
+  }
+  if (!want && sched.tz) {
+    sel.append(el("option", {value: "custom", textContent: "Saved time zone (" + sched.tz + ")"}));
+    sel.lastChild.dataset.tz = sched.tz;
+    sel.lastChild.dataset.name = sched.tz_name || "";
+  }
+  for (const [iana, label, posix] of ZONES) {
+    const o = el("option", {value: iana, textContent: label});
+    o.dataset.tz = posix;
+    o.dataset.name = iana;
+    sel.append(o);
+  }
+  sel.value = want || "custom";
+  return sel;
+}
+
+function contactBlock(i, c) {
+  const sched = c.schedule || {enabled: false, windows: []};
+  const box = el("div", {className: "contact"});
+  box.dataset.slot = i;
+  const chip = el("span", {className: "chip"});
+  chip.id = "chip-" + i;
+  box.append(el("div", {className: "chead"}, el("h3", {textContent: "Button " + (i + 1)}), chip));
+
+  const name = el("input", {maxLength: 31, placeholder: i === 0 ? "Grandma" : "Name", value: c.name || ""});
+  const num = el("input", {type: "tel", placeholder: "+1 555 123 4567", value: c.number || ""});
+  name.className = "f-name";
+  num.className = "f-num";
+  box.append(el("div", {className: "two"},
+    el("div", {}, el("label", {textContent: "Name"}), name),
+    el("div", {}, el("label", {textContent: "Phone number"}), num)));
+
+  const tog = el("input", {type: "checkbox", checked: !!sched.enabled});
+  tog.className = "f-sched";
+  box.append(el("label", {className: "toggle"}, tog, "Only when they're available"));
+
+  const panel = el("div", {className: "sched"});
+  panel.append(el("p", {className: "hint", textContent:
+    "Ask them when they are happy to take calls. Outside these times the light stays off and the button plays a busy tone instead of calling."}));
+  const zsel = zoneSelect(sched);
+  zsel.className = "f-zone";
+  panel.append(el("label", {textContent: "Their time zone"}), zsel);
+  const wins = el("div", {className: "f-wins"});
+  (sched.windows || []).forEach((w) => wins.append(windowRow(w)));
+  panel.append(el("label", {textContent: "When they can take calls (their time)"}), wins);
+  const adds = el("div", {className: "f-adds"});
+  for (const [label, days, s, e] of PRESETS) {
+    const b = el("button", {type: "button", className: "secondary mini", textContent: "+ " + label});
+    b.addEventListener("click", () => { wins.append(windowRow({days, start: s, end: e})); dirty = true; refreshAddButtons(); });
+    adds.append(b);
+  }
+  const custom = el("button", {type: "button", className: "secondary mini", textContent: "+ Custom"});
+  custom.addEventListener("click", () => { wins.append(windowRow({days: 0, start: 18 * 60, end: 19 * 60})); dirty = true; refreshAddButtons(); });
+  adds.append(custom);
+  panel.append(adds);
+  box.append(panel);
+
+  const sync = () => {
+    panel.classList.toggle("hidden", !tog.checked);
+    if (tog.checked && !wins.children.length) wins.append(windowRow({days: PRESETS[0][1], start: PRESETS[0][2], end: PRESETS[0][3]}));
+    refreshAddButtons();
+  };
+  tog.addEventListener("change", sync);
+  sync();
+  return box;
+}
+
+function refreshAddButtons() {
+  document.querySelectorAll(".contact").forEach((box) => {
+    const full = box.querySelector(".f-wins").children.length >= NWIN;
+    box.querySelectorAll(".f-adds button").forEach((b) => { b.disabled = full; });
+  });
+}
+
+/* What the phone has saved (not the live availability), to notice changes. */
+function savedSig() {
+  return JSON.stringify((st.twilio.contacts || []).map((c) => [c.name, c.number, c.schedule]));
+}
+
+function loadForm() {
+  const f = $("family");
+  const cs = (st.twilio.contacts || []);
+  f.replaceChildren(...Array.from({length: NSLOTS}, (_, i) => contactBlock(i, cs[i] || {})));
+  formSig = savedSig();
+  dirty = false;
+}
+
+/* Read the form. Returns {contacts} or {error}. */
+function readForm() {
+  const out = [];
+  for (const box of document.querySelectorAll(".contact")) {
+    const i = Number(box.dataset.slot);
+    const name = box.querySelector(".f-name").value.trim();
+    const number = box.querySelector(".f-num").value.trim();
+    const on = box.querySelector(".f-sched").checked;
+    const opt = box.querySelector(".f-zone").selectedOptions[0];
+    const windows = [];
+    for (const w of box.querySelectorAll(".win")) {
+      let days = 0;
+      w.querySelectorAll("input[type=checkbox]").forEach((cb) => { if (cb.checked) days |= 1 << Number(cb.dataset.day); });
+      const [from, to] = w.querySelectorAll("input[type=time]");
+      if (number && on) {
+        if (!days) return {error: "Button " + (i + 1) + ": pick at least one day for each time."};
+        if (!from.value || !to.value) return {error: "Button " + (i + 1) + ": fill in both times."};
+      }
+      windows.push({days, start: mins(from.value || "00:00"), end: mins(to.value || "00:00")});
+    }
+    if (number && on && !windows.length) return {error: "Button " + (i + 1) + ": add at least one time when they are available."};
+    out.push({name, number, schedule: {enabled: on, tz: opt ? opt.dataset.tz : "", tz_name: opt ? opt.dataset.name : "", windows}});
+  }
+  if (!out.some((c) => c.number)) return {error: "Add at least one person to call, with their phone number."};
+  return {contacts: out};
+}
+
+$("family").addEventListener("input", () => { dirty = true; $("save-msg").textContent = ""; });
+$("family").addEventListener("change", () => { dirty = true; });
+
+/* ---------- status rendering ---------- */
+
+function availText(c) {
+  if (!c.number) return ["Not used", false];
+  if (!st.time_synced && c.scheduled) return ["Available (clock not synced yet)", true];
+  if (!c.scheduled) return ["Always available", true];
+  if (c.available) return ["Available now", true];
+  if (c.next) return ["Next available: " + c.next.day + " " + c.next.time + " (their time)", false];
+  return ["Not available", false];
 }
 
 function render() {
-  const w = st.wifi, t = st.twilio, c0 = t.contacts[0];
+  const w = st.wifi, t = st.twilio, cs = t.contacts || [];
   setText("s-wifi", w.connected ? "Connected to " + w.ssid + (w.ip ? " (" + w.ip + ")" : "") : "Not connected", w.connected ? "good" : "bad");
   setText("s-tw", t.provisioned ? "Ready" : "Not set up yet", t.provisioned ? "good" : "bad");
   setText("s-hs", st.handset ? "Plugged in" : "Not detected (plug it into the USB port marked OTG)", st.handset ? "good" : "bad");
-  setText("s-to", c0 ? c0.name + " " + c0.number : "Nobody yet");
+  setText("s-clock", st.time_synced ? "Synced" : "Clock not synced (calls are allowed at any time until it is)", st.time_synced ? "good" : "bad");
   setText("s-from", t.caller_id || "Not set up yet");
+  show("old-login", t.provisioned && !t.login_current);
   $("fw").textContent = "Firmware " + st.firmware;
-  if (c0) $("r-name").textContent = c0.name;
 
   const s = st.setup, running = s.state === "running";
+  if (formSig === null || (!dirty && !running && !twMode && savedSig() !== formSig)) loadForm();
+  cs.forEach((c, i) => {
+    const chip = $("chip-" + i);
+    if (!chip) return;
+    const [text, on] = availText(c);
+    chip.textContent = text;
+    chip.className = "chip" + (on ? " on" : "");
+  });
+
   show("c-progress", s.state !== "idle");
-  const log = $("log");
-  log.replaceChildren(...s.steps.map((line, i) => {
-    const li = document.createElement("li");
-    li.textContent = line;
-    if (running && i === s.steps.length - 1) li.className = "cur";
+  $("log").replaceChildren(...s.steps.map((line, i) => {
+    const li = el("li", {textContent: line});
+    if (line.startsWith("Warning:")) li.className = "warn";
+    else if (running && i === s.steps.length - 1) li.className = "cur";
     return li;
   }));
   show("p-err", s.state === "failed");
-  if (s.state === "failed") { $("p-err-t").textContent = s.error; $("p-err-h").textContent = s.hint; }
+  if (s.state === "failed") { $("p-err-t").textContent = s.error; $("p-err-h").textContent = " " + s.hint; }
 
-  show("c-form", !running && (!t.provisioned || editing));
-  show("b-cancel", t.provisioned);
+  const mode = !t.provisioned ? "setup" : twMode;
+  show("c-tw", !running && !!mode);
+  show("tw-intro", mode === "setup" || mode === "full");
+  $("tw-title").textContent = mode === "numbers" ? "Tell Twilio about the new numbers" : mode === "full" ? "Run setup again" : "Connect to Twilio";
+  $("b-connect").textContent = mode === "numbers" ? "Update and save" : mode === "full" ? "Run setup" : "Connect";
   $("b-connect").disabled = running || !w.connected;
-  show("c-ready", t.provisioned && !running && !editing);
+  show("b-tw-cancel", t.provisioned);
+  if (!$("sid").value && t.account_sid) $("sid").value = t.account_sid;
+  show("b-save", t.provisioned && !running);
+  $("b-save").disabled = running;
 
-  const cs = st.call.state, idle = cs === "IDLE";
-  $("b-call").disabled = !idle || !w.connected;
+  show("c-ready", t.provisioned && !running);
+  const cs2 = st.call.state, idle = cs2 === "IDLE";
+  const cb = $("call-buttons");
+  cb.replaceChildren(...cs.map((c, i) => {
+    if (!c.number) return "";
+    const b = el("button", {type: "button", textContent: "Call " + (c.name || "button " + (i + 1))});
+    b.disabled = !idle || !w.connected;
+    b.addEventListener("click", () => testCall(i));
+    return b;
+  }));
   $("b-hang").disabled = idle;
-  const words = {IDLE: "", CALLING: "Calling...", RINGING: "Ringing...", IN_CALL: "Connected. Talk on the handset.", ENDING: "Hanging up..."};
-  $("call-state").textContent = words[cs] || cs;
+  const who = st.call.contact >= 0 && cs[st.call.contact] ? cs[st.call.contact].name : "";
+  const words = {IDLE: "", CALLING: "Calling " + who + "...", RINGING: "Ringing...", IN_CALL: "Connected. Talk on the handset.", ENDING: "Hanging up..."};
+  if (!idle || watchSeq !== null) $("call-state").textContent = words[cs2] || cs2;
   checkCallResult();
-}
-
-function callHint(r) {
-  const geo = "If the number is in another country, turn that country on in the Twilio Console under Voice > Settings > Geo permissions.";
-  const trial = "On a trial account, Twilio only calls numbers you have verified (Console > Phone Numbers > Verified Caller IDs).";
-  if (r.failed) {
-    if (r.code === 401 || r.code === 407) return ["The phone's login was refused.", "Press Change number and connect again to refresh it."];
-    if (r.code === 403 || r.code === 404 || r.code === 488 || r.code === 503) return ["Twilio did not put the call through (" + r.code + ").", geo + " " + trial];
-    if (r.code === 486 || r.code === 600 || r.code === 603) return ["The other phone was busy or declined.", "Try again in a moment."];
-    if (r.code) return ["The call failed (" + r.code + ").", geo];
-    return ["The call could not start: " + r.reason + ".", "Check the WiFi connection, then try again."];
-  }
-  if (r.answered && r.remote_hangup && r.talk_ms < 5000) return ["The call ended right away.", geo + " " + trial];
-  return null;
 }
 
 function checkCallResult() {
@@ -185,10 +503,14 @@ function checkCallResult() {
   const r = st.call.last;
   if (r.seq === watchSeq || st.call.state !== "IDLE") return;
   watchSeq = null;
-  const h = callHint(r);
-  show("call-err", !!h);
-  if (h) { $("call-err-t").textContent = h[0]; $("call-err-h").textContent = " " + h[1]; }
-  else $("call-state").textContent = "Call ended.";
+  show("call-err", !!r.message);
+  if (r.message) {
+    $("call-err-t").textContent = r.message;
+    $("call-err-code").textContent = r.code ? "SIP status " + r.code : "(" + r.reason + ")";
+    $("call-state").textContent = "";
+  } else {
+    $("call-state").textContent = "Call ended.";
+  }
 }
 
 async function poll() {
@@ -202,12 +524,44 @@ async function poll() {
 
 function kick() { clearTimeout(pollTimer); poll(); }
 
-$("form").addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  const body = {
-    account_sid: $("sid").value.trim(), auth_token: $("token").value.trim(),
-    contact_name: $("cname").value.trim(), contact_number: $("cnum").value.trim()
-  };
+/* ---------- actions ---------- */
+
+function openTwilio(mode, why) {
+  twMode = mode;
+  $("tw-why").textContent = why || "";
+  show("tw-why", !!why);
+  render();
+  $(st.twilio.account_sid ? "token" : "sid").focus();
+}
+
+$("b-save").addEventListener("click", async () => {
+  const f = readForm();
+  if (f.error) { $("save-msg").textContent = f.error; return; }
+  $("b-save").disabled = true;
+  const r = await api("/api/contacts", {contacts: f.contacts});
+  $("b-save").disabled = false;
+  if (r.ok) {
+    $("save-msg").textContent = "Saved.";
+    dirty = false;
+    kick();
+  } else if (r.j.needs_token) {
+    pendingContacts = f.contacts;
+    $("save-msg").textContent = "";
+    openTwilio("numbers", r.j.error);
+  } else {
+    $("save-msg").textContent = r.j.error || "Could not save. Try again.";
+  }
+});
+
+$("b-connect").addEventListener("click", async () => {
+  const mode = !st.twilio.provisioned ? "setup" : twMode;
+  let contacts = pendingContacts;
+  if (mode !== "numbers") {
+    const f = readForm();
+    if (f.error) { alert(f.error); return; }
+    contacts = f.contacts;
+  }
+  const body = {account_sid: $("sid").value.trim(), auth_token: $("token").value.trim(), contacts, full: mode !== "numbers"};
   $("b-connect").disabled = true;
   const r = await api("/api/provision", body);
   $("token").value = "";
@@ -216,25 +570,23 @@ $("form").addEventListener("submit", async (ev) => {
     $("b-connect").disabled = false;
     return;
   }
-  editing = false;
+  twMode = null;
+  pendingContacts = null;
+  dirty = false;
   kick();
 });
 
-$("b-cancel").addEventListener("click", () => { editing = false; render(); });
-$("b-change").addEventListener("click", () => {
-  editing = true;
-  const c0 = st.twilio.contacts[0];
-  if (c0) { $("cname").value = c0.name; $("cnum").value = c0.number; }
-  render();
-  $("sid").focus();
-});
-$("b-call").addEventListener("click", async () => {
+$("b-tw-cancel").addEventListener("click", () => { twMode = null; pendingContacts = null; render(); });
+$("b-rerun").addEventListener("click", () => openTwilio("full",
+  "Setup runs again with the people above. It gives the phone a fresh login, which fixes most call problems."));
+
+async function testCall(i) {
   show("call-err", false);
   watchSeq = st.call.last.seq;
-  const r = await api("/api/call", {});
+  const r = await api("/api/call", {contact: i});
   if (!r.ok) { watchSeq = null; alert(r.j.error || "Could not start the call."); }
   kick();
-});
+}
 $("b-hang").addEventListener("click", async () => { await api("/api/hangup", {}); kick(); });
 
 poll();
