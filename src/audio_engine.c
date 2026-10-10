@@ -14,6 +14,7 @@
 #include "g711.h"
 #include "modes.h"
 #include "resampler.h"
+#include "rtp.h"
 #include "usb_audio.h"
 
 static const char *TAG = "audio";
@@ -134,6 +135,7 @@ typedef struct {
 
     /* dial tone oscillators */
     float ph1, ph2;
+    uint32_t ring_pos;   /* samples into the ringback cadence */
 
     bool primed;           /* loopback has enough mic data buffered */
     app_mode_t last_mode;
@@ -270,6 +272,23 @@ static void telephone_path(const int16_t *mic, size_t mic_n, int16_t *out, bool 
     resampler_interp_process(&E.itp, s_blk_tel, n8, out);
 }
 
+/*
+ * Call: the mode B pipeline split in two halves around the network.
+ *   mic -> decimate to 8 kHz -> mu-law -> RTP sender (stream buffer)
+ *   jitter buffer -> mu-law decode -> interpolate to the earpiece rate
+ * The jitter buffer returns silence until early media or the answer arrives.
+ */
+static void call_path(const int16_t *mic, size_t mic_n, int16_t *out)
+{
+    size_t n8 = resampler_decim_process(&E.dec, mic, mic_n, s_blk_tel);
+    g711_ulaw_encode_buf(s_blk_tel, s_blk_ulaw, n8);
+    rtp_audio_tx_push(s_blk_ulaw, n8);
+
+    rtp_audio_rx_pull(s_blk_ulaw, TEL_BLOCK);
+    g711_ulaw_decode_buf(s_blk_ulaw, s_blk_tel, TEL_BLOCK);
+    resampler_interp_process(&E.itp, s_blk_tel, TEL_BLOCK, out);
+}
+
 static void dial_tone(int16_t *out, size_t n, uint32_t rate)
 {
     const float two_pi = 6.28318530718f;
@@ -289,8 +308,39 @@ static void dial_tone(int16_t *out, size_t n, uint32_t rate)
     }
 }
 
+/* US ringback: 440 + 480 Hz, 2 s on, 4 s off. Starts at the top of a ring. */
+static void ringback(int16_t *out, size_t n, uint32_t rate)
+{
+    const uint32_t on = rate * APP_RINGBACK_ON_MS / 1000;
+    const uint32_t period = rate * (APP_RINGBACK_ON_MS + APP_RINGBACK_OFF_MS) / 1000;
+    const float two_pi = 6.28318530718f;
+    const float d1 = two_pi * 440.0f / rate;
+    const float d2 = two_pi * 480.0f / rate;
+    const float a = APP_RINGBACK_AMPL * 32767.0f;
+    for (size_t i = 0; i < n; i++) {
+        out[i] = E.ring_pos < on ? (int16_t)(a * (sinf(E.ph1) + sinf(E.ph2))) : 0;
+        E.ph1 += d1;
+        E.ph2 += d2;
+        if (E.ph1 > two_pi) {
+            E.ph1 -= two_pi;
+        }
+        if (E.ph2 > two_pi) {
+            E.ph2 -= two_pi;
+        }
+        if (++E.ring_pos >= period) {
+            E.ring_pos = 0;
+        }
+    }
+}
+
 static void produce_block(app_mode_t mode, size_t out_n)
 {
+    static app_mode_t prev = MODE_D_SILENCE;
+    if (mode == MODE_RINGBACK && prev != MODE_RINGBACK) {
+        E.ring_pos = 0;
+    }
+    prev = mode;
+
     const size_t mic_n = E.have_mic ? (size_t)E.mic.rate / 1000 * APP_BLOCK_MS : 0;
 
     switch (mode) {
@@ -317,6 +367,17 @@ static void produce_block(app_mode_t mode, size_t out_n)
     case MODE_C_DIAL_TONE:
         dial_tone(s_blk_out, out_n, E.spk.rate);
         break;
+    case MODE_RINGBACK:
+        ringback(s_blk_out, out_n, E.spk.rate);
+        break;
+    case MODE_CALL:
+        if (E.tel_ok) {
+            take_mic(s_blk_mic, mic_n);
+            call_path(s_blk_mic, mic_n, s_blk_out);
+        } else {
+            memset(s_blk_out, 0, out_n * sizeof(int16_t));
+        }
+        break;
     case MODE_D_SILENCE:
     default:
         memset(s_blk_out, 0, out_n * sizeof(int16_t));
@@ -335,10 +396,10 @@ static void print_stats(app_mode_t mode)
         snprintf(spk, sizeof(spk), "%" PRIu32 "Hz/%uch/%ub", E.spk.rate, E.spk.channels, E.spk.bits);
     }
     float dbfs = E.peak > 0 ? 20.0f * log10f(E.peak / 32768.0f) : -99.0f;
-    ESP_LOGI(TAG, "stats 5s: mode %c | mic %s earpiece %s | in %" PRIu32 " out %" PRIu32
+    ESP_LOGI(TAG, "stats 5s: mode %s | mic %s earpiece %s | in %" PRIu32 " out %" PRIu32
              " frames | underruns %" PRIu32 " overruns %" PRIu32 " txfail %" PRIu32
              " | mic peak %d (%.1f dBFS) | jitter buf %u",
-             app_mode_letter(mode), mic, spk, E.frames_in, E.frames_out,
+             app_mode_short(mode), mic, spk, E.frames_in, E.frames_out,
              E.underruns, E.overruns, E.tx_fail, E.peak, dbfs, (unsigned)s_mr_count);
     E.frames_in = E.frames_out = E.underruns = E.overruns = E.tx_fail = 0;
     E.peak = 0;
@@ -361,6 +422,7 @@ static void audio_task(void *arg)
                 reconfigure(st);
             }
             if (mode != E.last_mode) {
+                ESP_LOGI(TAG, "audio mode %s -> %s", app_mode_short(E.last_mode), app_mode_short(mode));
                 reset_paths();
                 E.last_mode = mode;
             }
@@ -400,7 +462,7 @@ static void audio_task(void *arg)
             if (E.have_mic || E.have_spk) {
                 print_stats(mode);
             } else {
-                ESP_LOGI(TAG, "stats 5s: mode %c | no handset connected", app_mode_letter(mode));
+                ESP_LOGI(TAG, "stats 5s: mode %s | no handset connected", app_mode_short(mode));
             }
         }
     }

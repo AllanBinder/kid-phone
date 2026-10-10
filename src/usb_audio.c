@@ -10,6 +10,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "usb/usb_host.h"
+#include "soc/soc.h"
 
 #include "app_config.h"
 
@@ -364,14 +365,49 @@ static void close_stream(uac_host_device_handle_t h)
  * Tasks
  * ------------------------------------------------------------------------- */
 
+/* Bring-up probe: raw DWC OTG host port register (HPRT, base 0x60080000 + 0x440).
+ * Polled every 2 s, logged only when the value changes. */
+static void port_probe_task(void *arg)
+{
+    (void)arg;
+    uint32_t last = UINT32_MAX;
+    while (1) {
+        uint32_t h = REG_READ(0x60080440);
+        if (h == last) {
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            continue;
+        }
+        last = h;
+        ESP_LOGI(TAG, "HPRT=0x%08" PRIx32 " conn=%u enabled=%u power=%u linestate D+=%u D-=%u speed=%u",
+                 h, (unsigned)(h & 1), (unsigned)((h >> 2) & 1), (unsigned)((h >> 12) & 1),
+                 (unsigned)((h >> 10) & 1), (unsigned)((h >> 11) & 1), (unsigned)((h >> 17) & 3));
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+}
+
 static void usb_lib_task(void *arg)
 {
     const usb_host_config_t host_cfg = {
         .skip_phy_setup = false,
         .intr_flags = ESP_INTR_FLAG_LOWMED,
+        /* 200-line (800 B) FIFO split by hand: the AB17X earpiece isoc OUT
+         * endpoint has MPS 384, too big for the default bias presets.
+         * RX 88 lines = 344 B IN MPS (mic), PTX 96 = 384 B (earpiece),
+         * NPTX 16 = 64 B (control). */
+        .fifo_settings_custom = {
+            .nptx_fifo_lines = 16,
+            .ptx_fifo_lines = 96,
+            .rx_fifo_lines = 88,
+        },
     };
+    /* Bring-up: show root port connect/enumeration activity */
+    esp_log_level_set("HUB", ESP_LOG_DEBUG);
+    esp_log_level_set("ENUM", ESP_LOG_DEBUG);
+    esp_log_level_set("USBH", ESP_LOG_DEBUG);
+    esp_log_level_set("USB HOST", ESP_LOG_DEBUG);
     ESP_ERROR_CHECK(usb_host_install(&host_cfg));
     ESP_LOGI(TAG, "USB host installed (native port, GPIO 19/20)");
+    xTaskCreate(port_probe_task, "port_probe", 3072, NULL, 2, NULL);
     xTaskNotifyGive((TaskHandle_t)arg);
     while (1) {
         uint32_t flags = 0;

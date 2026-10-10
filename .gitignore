@@ -5,3 +5,4 @@ sdkconfig.old
 managed_components/
 sdkconfig.esp32s3
 .vscode/
+src/secrets.h

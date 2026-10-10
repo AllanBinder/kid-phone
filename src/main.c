@@ -1,8 +1,12 @@
 /*
- * Toddler phone, stage 1: USB Audio Class handset proof of concept.
+ * Toddler phone, stage 2: the button places a real phone call over SIP.
  *
  * ESP32-S3 is USB host (native port, GPIO 19/20) to a USB-C telephone
- * handset. One button on APP_BUTTON_GPIO cycles four audio modes.
+ * handset, and a SIP client over WiFi to a Twilio SIP Domain. One button on
+ * APP_BUTTON_GPIO:
+ *   idle, short press      call TEST_DEST_NUMBER
+ *   in a call, any press   hang up (CANCEL while ringing, BYE when answered)
+ *   idle, long press       cycle the stage 1 audio test modes A-D
  * Console is UART0 (the board's COM port).
  */
 #include <stdatomic.h>
@@ -15,21 +19,31 @@
 #include "app_config.h"
 #include "audio_engine.h"
 #include "modes.h"
+#include "rtp.h"
+#include "sip.h"
 #include "usb_audio.h"
+#include "wifi.h"
 
 static const char *TAG = "main";
 
-static _Atomic int s_mode = MODE_C_DIAL_TONE;
+/* Test mode chosen with long presses while idle, or -1 for the normal idle
+ * sound (dial tone once WiFi is up, silence before). */
+static _Atomic int s_test_mode = -1;
 
 app_mode_t app_mode_get(void)
 {
-    return (app_mode_t)atomic_load(&s_mode);
-}
-
-void app_mode_next(void)
-{
-    int m = (atomic_load(&s_mode) + 1) % MODE_COUNT;
-    atomic_store(&s_mode, m);
+    call_state_t cs = sip_call_state();
+    if (cs == CALL_RINGING && !rtp_media_received()) {
+        return MODE_RINGBACK; /* Twilio sends 180 with no media: ring locally */
+    }
+    if (cs != CALL_IDLE) {
+        return MODE_CALL;
+    }
+    int t = atomic_load(&s_test_mode);
+    if (t >= 0) {
+        return (app_mode_t)t;
+    }
+    return wifi_is_connected() ? MODE_C_DIAL_TONE : MODE_D_SILENCE;
 }
 
 const char *app_mode_name(app_mode_t m)
@@ -39,18 +53,49 @@ const char *app_mode_name(app_mode_t m)
     case MODE_B_TELEPHONE_LOOPBACK: return "telephone loopback (8 kHz + G.711 mu-law)";
     case MODE_C_DIAL_TONE: return "US dial tone (350 + 440 Hz)";
     case MODE_D_SILENCE: return "silence";
+    case MODE_CALL: return "call (mic -> RTP, RTP -> earpiece)";
+    case MODE_RINGBACK: return "US ringback (440 + 480 Hz, 2 s on / 4 s off)";
     default: return "?";
     }
 }
 
-char app_mode_letter(app_mode_t m)
+const char *app_mode_short(app_mode_t m)
 {
-    return (char)('A' + (int)m);
+    static const char *k[] = {"A", "B", "C", "D", "CALL", "RING"};
+    return (unsigned)m <= MODE_RINGBACK ? k[m] : "?";
+}
+
+/* Long press while idle: auto -> A -> B -> C -> D -> auto. */
+static void cycle_test_mode(void)
+{
+    int t = atomic_load(&s_test_mode) + 1;
+    if (t >= MODE_TEST_COUNT) {
+        t = -1;
+    }
+    atomic_store(&s_test_mode, t);
+    if (t < 0) {
+        ESP_LOGI(TAG, "BUTTON long: test mode off, idle sound = %s", app_mode_name(app_mode_get()));
+    } else {
+        ESP_LOGI(TAG, "BUTTON long: test mode %s, %s", app_mode_short((app_mode_t)t), app_mode_name((app_mode_t)t));
+    }
+}
+
+static void on_short_press_idle(void)
+{
+    if (!wifi_is_connected()) {
+        ESP_LOGW(TAG, "BUTTON: no WiFi yet, cannot call");
+        return;
+    }
+    ESP_LOGI(TAG, "BUTTON: place call");
+    atomic_store(&s_test_mode, -1); /* back to dial tone after the call */
+    sip_call_start();
 }
 
 /*
  * Button: polled, no ISR. Pressed = low (internal pull-up, switch to GND).
  * The level must be stable for APP_BUTTON_DEBOUNCE_MS before it counts.
+ * In a call, the press itself hangs up. Idle, the release decides between a
+ * short press (call) and a long press (fires at APP_BUTTON_LONG_MS).
  */
 static void button_task(void *arg)
 {
@@ -67,6 +112,9 @@ static void button_task(void *arg)
     int stable = 1;      /* debounced level, 1 = released */
     int last_raw = 1;
     int same_ms = 0;
+    int held_ms = 0;
+    bool idle_press = false;  /* current press started while idle */
+    bool long_fired = false;
     while (1) {
         int raw = gpio_get_level(APP_BUTTON_GPIO);
         if (raw == last_raw) {
@@ -80,9 +128,24 @@ static void button_task(void *arg)
         if (same_ms >= APP_BUTTON_DEBOUNCE_MS && raw != stable) {
             stable = raw;
             if (stable == 0) {
-                app_mode_next();
-                app_mode_t m = app_mode_get();
-                ESP_LOGI(TAG, "BUTTON: mode -> %c, %s", app_mode_letter(m), app_mode_name(m));
+                held_ms = 0;
+                long_fired = false;
+                idle_press = sip_call_state() == CALL_IDLE;
+                if (!idle_press) {
+                    ESP_LOGI(TAG, "BUTTON: hang up (state %s)", sip_call_state_name(sip_call_state()));
+                    sip_call_hangup();
+                }
+            } else if (idle_press && !long_fired) {
+                on_short_press_idle();
+            }
+        }
+        if (stable == 0 && idle_press && !long_fired) {
+            held_ms += APP_BUTTON_POLL_MS;
+            if (held_ms >= APP_BUTTON_LONG_MS) {
+                long_fired = true;
+                if (sip_call_state() == CALL_IDLE) {
+                    cycle_test_mode();
+                }
             }
         }
         vTaskDelay(pdMS_TO_TICKS(APP_BUTTON_POLL_MS));
@@ -91,10 +154,12 @@ static void button_task(void *arg)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "kid_phone stage 1: USB handset audio test");
-    ESP_LOGI(TAG, "Mode button on GPIO %d (to GND). Starting in mode %c, %s",
-             APP_BUTTON_GPIO, app_mode_letter(app_mode_get()), app_mode_name(app_mode_get()));
+    ESP_LOGI(TAG, "kid_phone stage 2: button places a SIP call");
+    ESP_LOGI(TAG, "Button on GPIO %d (to GND): press = call / hang up, hold %d ms while idle = cycle test modes A-D",
+             APP_BUTTON_GPIO, APP_BUTTON_LONG_MS);
 
+    wifi_start();
+    sip_start();
     usb_audio_start();
     audio_engine_start();
     xTaskCreatePinnedToCore(button_task, "button", 3072, NULL, 3, NULL, 0);

@@ -5,11 +5,14 @@ typedef enum {
     MODE_B_TELEPHONE_LOOPBACK,
     MODE_C_DIAL_TONE,
     MODE_D_SILENCE,
-    MODE_COUNT,
+    MODE_TEST_COUNT,            /* A-D are the audio test modes (long press) */
+    MODE_CALL = MODE_TEST_COUNT, /* SIP call: mic -> RTP, RTP -> earpiece */
+    MODE_RINGBACK,              /* remote is ringing, no early media: local US ringback */
 } app_mode_t;
 
-/* Current mode, written by the button task, read by the audio task. */
+/* Effective audio mode, derived by main.c from the call state, WiFi state
+ * and the test mode selection. Read by the audio task every block. */
 app_mode_t app_mode_get(void);
-void app_mode_next(void);
 const char *app_mode_name(app_mode_t m);
-char app_mode_letter(app_mode_t m);
+/* Short label for logs: "A".."D", "CALL" or "RING". */
+const char *app_mode_short(app_mode_t m);
