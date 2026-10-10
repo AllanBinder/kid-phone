@@ -38,3 +38,6 @@ void usb_audio_unlock(void);
 
 /* Only valid while locked. */
 ua_state_t *usb_audio_state(void);
+
+/* True while the handset's earpiece or mic stream is running. */
+bool usb_audio_handset_connected(void);

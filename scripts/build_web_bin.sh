@@ -15,6 +15,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# A published image must not carry WiFi or SIP credentials. secrets.h is a
+# developer override that gets compiled in, so refuse unless explicitly local.
+if [[ -f "$ROOT/src/secrets.h" && " $* " != *" --allow-secrets "* ]]; then
+  echo "error: src/secrets.h exists and would be baked into the image." >&2
+  echo "Move it aside and rebuild, or pass --allow-secrets for a local-only test image." >&2
+  exit 1
+fi
 ENV_NAME="esp32s3"
 BUILD_DIR="$ROOT/.pio/build/$ENV_NAME"
 SDKCONFIG="$ROOT/sdkconfig.$ENV_NAME"
@@ -32,6 +40,7 @@ VERSION=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --build) DO_BUILD=1 ;;
+    --allow-secrets) ;;
     --version) VERSION="${2:?--version needs a value}"; shift ;;
     -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;

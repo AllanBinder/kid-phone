@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kid Phone Setup</title>
+<style>
+:root {
+  --bg: #f6f4ef; --card: #ffffff; --ink: #1f2328; --muted: #5f6670; --line: #e3dfd6;
+  --accent: #2f6f4f; --accent-ink: #ffffff; --warn: #9a3412; --warn-bg: #fff1e6; --ok: #2f6f4f;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15171a; --card: #1e2125; --ink: #e8e6e1; --muted: #a0a6ad; --line: #30343a;
+    --accent: #5fb98a; --accent-ink: #0d1a13; --warn: #fdba74; --warn-bg: #2a1d12; --ok: #5fb98a;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+main { max-width: 560px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 26px; margin: 8px 0 4px; }
+h2 { font-size: 18px; margin: 0 0 12px; }
+p { margin: 8px 0; }
+.sub { color: var(--muted); margin: 0 0 20px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; margin: 0 0 16px; }
+.row { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.row:last-child { border-bottom: 0; }
+.row span:first-child { color: var(--muted); }
+.row span:last-child { text-align: right; overflow-wrap: anywhere; }
+.good { color: var(--ok); font-weight: 600; }
+.bad { color: var(--warn); font-weight: 600; }
+label { display: block; font-weight: 600; margin: 14px 0 4px; }
+.hint { color: var(--muted); font-size: 14px; margin: 2px 0 0; }
+input { width: 100%; font: inherit; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg); color: var(--ink); }
+input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+button { font: inherit; font-weight: 600; padding: 10px 18px; border-radius: 8px; border: 1px solid var(--accent);
+  background: var(--accent); color: var(--accent-ink); cursor: pointer; margin: 14px 8px 0 0; }
+button.secondary { background: transparent; color: var(--accent); }
+button:disabled { opacity: 0.5; cursor: default; }
+ol { padding-left: 20px; margin: 8px 0; }
+#log { list-style: none; padding: 0; margin: 0; }
+#log li { padding: 4px 0 4px 22px; position: relative; }
+#log li::before { content: "\2713"; position: absolute; left: 0; color: var(--ok); }
+#log li.cur::before { content: "\2022"; color: var(--muted); }
+.alert { background: var(--warn-bg); color: var(--warn); border-radius: 8px; padding: 10px 12px; margin: 12px 0 0; }
+.alert b { display: block; }
+.hidden { display: none; }
+footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 24px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Kid Phone</h1>
+  <p class="sub">Set up the phone so it can call family. Everything stays between this phone and your own Twilio account.</p>
+
+  <section class="card">
+    <h2>Status</h2>
+    <div class="row"><span>WiFi</span><span id="s-wifi">...</span></div>
+    <div class="row"><span>Phone service</span><span id="s-tw">...</span></div>
+    <div class="row"><span>Handset</span><span id="s-hs">...</span></div>
+    <div class="row"><span>Calls go to</span><span id="s-to">...</span></div>
+    <div class="row"><span>Calls come from</span><span id="s-from">...</span></div>
+  </section>
+
+  <section class="card hidden" id="c-form">
+    <h2 id="f-title">Connect to Twilio</h2>
+    <p>The phone uses your Twilio account to make calls. You need an account with one phone number (Twilio charges about $1 a month for the number plus a few cents per minute).</p>
+    <ol>
+      <li>Open <b>console.twilio.com</b> in another tab and log in.</li>
+      <li>On the home page, find <b>Account Info</b>.</li>
+      <li>Copy the <b>Account SID</b> and the <b>Auth Token</b> (click Show first) into the boxes below.</li>
+    </ol>
+    <form id="form" autocomplete="off">
+      <label for="sid">Account SID</label>
+      <input id="sid" name="sid" placeholder="AC..." spellcheck="false" autocapitalize="off" required>
+      <label for="token">Auth Token</label>
+      <input id="token" name="token" type="password" spellcheck="false" autocapitalize="off" required>
+      <p class="hint">Used once to set things up, then forgotten. The phone never stores it.</p>
+      <label for="cname">Who should the phone call?</label>
+      <input id="cname" name="cname" placeholder="Grandma" maxlength="31">
+      <label for="cnum">Their phone number</label>
+      <input id="cnum" name="cnum" type="tel" placeholder="+1 555 123 4567" required>
+      <p class="hint">International format: start with + and the country code, for example +1 555 123 4567 or +84 90 123 4567.</p>
+      <button type="submit" id="b-connect">Connect</button>
+      <button type="button" class="secondary hidden" id="b-cancel">Cancel</button>
+    </form>
+  </section>
+
+  <section class="card hidden" id="c-progress">
+    <h2>Setting up</h2>
+    <ul id="log"></ul>
+    <div class="alert hidden" id="p-err"><b id="p-err-t"></b><span id="p-err-h"></span></div>
+  </section>
+
+  <section class="card hidden" id="c-ready">
+    <h2>Try it</h2>
+    <p>Press <b>Test call</b> (or the phone's button) and pick up the handset. The phone calls <span id="r-name">your contact</span>.</p>
+    <button id="b-call">Test call</button>
+    <button class="secondary" id="b-hang" disabled>Hang up</button>
+    <button class="secondary" id="b-change">Change number</button>
+    <p id="call-state" class="hint"></p>
+    <div class="alert hidden" id="call-err"><b id="call-err-t"></b><span id="call-err-h"></span></div>
+  </section>
+
+  <footer>
+    Hold the phone's button for 10 seconds to erase all settings.<br>
+    <span id="fw"></span>
+  </footer>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const show = (id, on) => $(id).classList.toggle("hidden", !on);
+let st = null, editing = false, watchSeq = null, pollTimer = null;
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)
+  };
+  const r = await fetch(path, opt);
+  let j = {};
+  try { j = await r.json(); } catch (e) {}
+  return {ok: r.ok, j};
+}
+
+function setText(id, text, cls) {
+  const el = $(id);
+  el.textContent = text;
+  el.className = cls || "";
+}
+
+function render() {
+  const w = st.wifi, t = st.twilio, c0 = t.contacts[0];
+  setText("s-wifi", w.connected ? "Connected to " + w.ssid + (w.ip ? " (" + w.ip + ")" : "") : "Not connected", w.connected ? "good" : "bad");
+  setText("s-tw", t.provisioned ? "Ready" : "Not set up yet", t.provisioned ? "good" : "bad");
+  setText("s-hs", st.handset ? "Plugged in" : "Not detected (plug it into the USB port marked OTG)", st.handset ? "good" : "bad");
+  setText("s-to", c0 ? c0.name + " " + c0.number : "Nobody yet");
+  setText("s-from", t.caller_id || "Not set up yet");
+  $("fw").textContent = "Firmware " + st.firmware;
+  if (c0) $("r-name").textContent = c0.name;
+
+  const s = st.setup, running = s.state === "running";
+  show("c-progress", s.state !== "idle");
+  const log = $("log");
+  log.replaceChildren(...s.steps.map((line, i) => {
+    const li = document.createElement("li");
+    li.textContent = line;
+    if (running && i === s.steps.length - 1) li.className = "cur";
+    return li;
+  }));
+  show("p-err", s.state === "failed");
+  if (s.state === "failed") { $("p-err-t").textContent = s.error; $("p-err-h").textContent = s.hint; }
+
+  show("c-form", !running && (!t.provisioned || editing));
+  show("b-cancel", t.provisioned);
+  $("b-connect").disabled = running || !w.connected;
+  show("c-ready", t.provisioned && !running && !editing);
+
+  const cs = st.call.state, idle = cs === "IDLE";
+  $("b-call").disabled = !idle || !w.connected;
+  $("b-hang").disabled = idle;
+  const words = {IDLE: "", CALLING: "Calling...", RINGING: "Ringing...", IN_CALL: "Connected. Talk on the handset.", ENDING: "Hanging up..."};
+  $("call-state").textContent = words[cs] || cs;
+  checkCallResult();
+}
+
+function callHint(r) {
+  const geo = "If the number is in another country, turn that country on in the Twilio Console under Voice > Settings > Geo permissions.";
+  const trial = "On a trial account, Twilio only calls numbers you have verified (Console > Phone Numbers > Verified Caller IDs).";
+  if (r.failed) {
+    if (r.code === 401 || r.code === 407) return ["The phone's login was refused.", "Press Change number and connect again to refresh it."];
+    if (r.code === 403 || r.code === 404 || r.code === 488 || r.code === 503) return ["Twilio did not put the call through (" + r.code + ").", geo + " " + trial];
+    if (r.code === 486 || r.code === 600 || r.code === 603) return ["The other phone was busy or declined.", "Try again in a moment."];
+    if (r.code) return ["The call failed (" + r.code + ").", geo];
+    return ["The call could not start: " + r.reason + ".", "Check the WiFi connection, then try again."];
+  }
+  if (r.answered && r.remote_hangup && r.talk_ms < 5000) return ["The call ended right away.", geo + " " + trial];
+  return null;
+}
+
+function checkCallResult() {
+  if (watchSeq === null) return;
+  const r = st.call.last;
+  if (r.seq === watchSeq || st.call.state !== "IDLE") return;
+  watchSeq = null;
+  const h = callHint(r);
+  show("call-err", !!h);
+  if (h) { $("call-err-t").textContent = h[0]; $("call-err-h").textContent = " " + h[1]; }
+  else $("call-state").textContent = "Call ended.";
+}
+
+async function poll() {
+  try {
+    const r = await api("/api/status");
+    if (r.ok) { st = r.j; render(); }
+  } catch (e) {}
+  const busy = st && (st.setup.state === "running" || st.call.state !== "IDLE" || watchSeq !== null);
+  pollTimer = setTimeout(poll, busy ? 1000 : 3000);
+}
+
+function kick() { clearTimeout(pollTimer); poll(); }
+
+$("form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const body = {
+    account_sid: $("sid").value.trim(), auth_token: $("token").value.trim(),
+    contact_name: $("cname").value.trim(), contact_number: $("cnum").value.trim()
+  };
+  $("b-connect").disabled = true;
+  const r = await api("/api/provision", body);
+  $("token").value = "";
+  if (!r.ok) {
+    alert(r.j.error || "Something went wrong. Try again.");
+    $("b-connect").disabled = false;
+    return;
+  }
+  editing = false;
+  kick();
+});
+
+$("b-cancel").addEventListener("click", () => { editing = false; render(); });
+$("b-change").addEventListener("click", () => {
+  editing = true;
+  const c0 = st.twilio.contacts[0];
+  if (c0) { $("cname").value = c0.name; $("cnum").value = c0.number; }
+  render();
+  $("sid").focus();
+});
+$("b-call").addEventListener("click", async () => {
+  show("call-err", false);
+  watchSeq = st.call.last.seq;
+  const r = await api("/api/call", {});
+  if (!r.ok) { watchSeq = null; alert(r.j.error || "Could not start the call."); }
+  kick();
+});
+$("b-hang").addEventListener("click", async () => { await api("/api/hangup", {}); kick(); });
+
+poll();
+</script>
+</body>
+</html>

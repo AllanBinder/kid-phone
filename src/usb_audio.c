@@ -252,10 +252,14 @@ static void open_stream(uint8_t addr, uint8_t iface_num, bool is_mic)
         .callback_arg = NULL,
     };
     uac_host_device_handle_t h = NULL;
+#if APP_USB_DEBUG
     /* The driver logs the volume range at debug level during open. */
     esp_log_level_set("uac-host", ESP_LOG_DEBUG);
+#endif
     esp_err_t err = uac_host_device_open(&cfg, &h);
+#if APP_USB_DEBUG
     esp_log_level_set("uac-host", ESP_LOG_INFO);
+#endif
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "  open failed: %s", esp_err_to_name(err));
         return;
@@ -365,6 +369,7 @@ static void close_stream(uac_host_device_handle_t h)
  * Tasks
  * ------------------------------------------------------------------------- */
 
+#if APP_USB_DEBUG
 /* Bring-up probe: raw DWC OTG host port register (HPRT, base 0x60080000 + 0x440).
  * Polled every 2 s, logged only when the value changes. */
 static void port_probe_task(void *arg)
@@ -384,6 +389,7 @@ static void port_probe_task(void *arg)
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
 }
+#endif
 
 static void usb_lib_task(void *arg)
 {
@@ -400,14 +406,18 @@ static void usb_lib_task(void *arg)
             .rx_fifo_lines = 88,
         },
     };
+#if APP_USB_DEBUG
     /* Bring-up: show root port connect/enumeration activity */
     esp_log_level_set("HUB", ESP_LOG_DEBUG);
     esp_log_level_set("ENUM", ESP_LOG_DEBUG);
     esp_log_level_set("USBH", ESP_LOG_DEBUG);
     esp_log_level_set("USB HOST", ESP_LOG_DEBUG);
+#endif
     ESP_ERROR_CHECK(usb_host_install(&host_cfg));
     ESP_LOGI(TAG, "USB host installed (native port, GPIO 19/20)");
+#if APP_USB_DEBUG
     xTaskCreate(port_probe_task, "port_probe", 3072, NULL, 2, NULL);
+#endif
     xTaskNotifyGive((TaskHandle_t)arg);
     while (1) {
         uint32_t flags = 0;
@@ -474,4 +484,15 @@ void usb_audio_start(void)
     TaskHandle_t ctrl = NULL;
     xTaskCreatePinnedToCore(control_task, "uac_ctrl", 6144, NULL, 4, &ctrl, 0);
     xTaskCreatePinnedToCore(usb_lib_task, "usb_lib", 4096, (void *)ctrl, 10, NULL, 0);
+}
+
+bool usb_audio_handset_connected(void)
+{
+    if (!usb_audio_lock(pdMS_TO_TICKS(20))) {
+        return false;
+    }
+    const ua_state_t *st = usb_audio_state();
+    bool r = st->spk.active || st->mic.active;
+    usb_audio_unlock();
+    return r;
 }
