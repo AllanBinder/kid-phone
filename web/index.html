@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kid Phone Installer</title>
+<!-- ESP Web Tools runs in the parent's browser on this page only. The phone
+     itself never contacts anything but the parent's Twilio account. -->
+<script type="module" src="https://unpkg.com/esp-web-tools@10.1.0/dist/web/install-button.js?module"></script>
+<style>
+  body { font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 560px;
+         margin: 0 auto; padding: 24px 16px; background: #f6f4ef; color: #1f2328; }
+  @media (prefers-color-scheme: dark) { body { background: #15171a; color: #e8e6e1; } }
+  ol li { margin: 6px 0; }
+</style>
+</head>
+<body>
+<h1>Kid Phone installer</h1>
+<ol>
+  <li>Use Chrome or Edge on a computer.</li>
+  <li>Plug the phone's <b>COM</b> USB port into the computer (not the port the handset uses).</li>
+  <li>Press the button below, pick the serial port, and choose <b>Install</b>.</li>
+  <li>When asked, type your WiFi name and password.</li>
+  <li>Press <b>Visit device</b> to open the phone's setup page and connect Twilio.</li>
+</ol>
+<esp-web-install-button manifest="manifest.json"></esp-web-install-button>
+</body>
+</html>
