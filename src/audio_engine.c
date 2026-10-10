@@ -308,17 +308,23 @@ static void dial_tone(int16_t *out, size_t n, uint32_t rate)
     }
 }
 
-/* US ringback: 440 + 480 Hz, 2 s on, 4 s off. Starts at the top of a ring. */
-static void ringback(int16_t *out, size_t n, uint32_t rate)
+/*
+ * Two-tone cadence: f1 + f2 (f2 = 0 for a single tone) for on_ms, silence for
+ * off_ms. E.ring_pos counts samples into the cadence; produce_block() resets it
+ * on every mode change so each tone starts at the top of its "on" phase.
+ */
+static void cadence_tone(int16_t *out, size_t n, uint32_t rate, float f1, float f2, float ampl,
+                         uint32_t on_ms, uint32_t off_ms)
 {
-    const uint32_t on = rate * APP_RINGBACK_ON_MS / 1000;
-    const uint32_t period = rate * (APP_RINGBACK_ON_MS + APP_RINGBACK_OFF_MS) / 1000;
+    const uint32_t on = rate * on_ms / 1000;
+    const uint32_t period = rate * (on_ms + off_ms) / 1000;
     const float two_pi = 6.28318530718f;
-    const float d1 = two_pi * 440.0f / rate;
-    const float d2 = two_pi * 480.0f / rate;
-    const float a = APP_RINGBACK_AMPL * 32767.0f;
+    const float d1 = two_pi * f1 / rate;
+    const float d2 = two_pi * f2 / rate;
+    const float a = ampl * 32767.0f;
     for (size_t i = 0; i < n; i++) {
-        out[i] = E.ring_pos < on ? (int16_t)(a * (sinf(E.ph1) + sinf(E.ph2))) : 0;
+        float v = sinf(E.ph1) + (f2 > 0.0f ? sinf(E.ph2) : 0.0f);
+        out[i] = E.ring_pos < on ? (int16_t)(a * v) : 0;
         E.ph1 += d1;
         E.ph2 += d2;
         if (E.ph1 > two_pi) {
@@ -336,7 +342,7 @@ static void ringback(int16_t *out, size_t n, uint32_t rate)
 static void produce_block(app_mode_t mode, size_t out_n)
 {
     static app_mode_t prev = MODE_D_SILENCE;
-    if (mode == MODE_RINGBACK && prev != MODE_RINGBACK) {
+    if (mode != prev) {
         E.ring_pos = 0;
     }
     prev = mode;
@@ -367,8 +373,21 @@ static void produce_block(app_mode_t mode, size_t out_n)
     case MODE_C_DIAL_TONE:
         dial_tone(s_blk_out, out_n, E.spk.rate);
         break;
-    case MODE_RINGBACK:
-        ringback(s_blk_out, out_n, E.spk.rate);
+    case MODE_RINGBACK: /* US ringback: 440 + 480 Hz, 2 s on, 4 s off */
+        cadence_tone(s_blk_out, out_n, E.spk.rate, 440.0f, 480.0f, APP_RINGBACK_AMPL,
+                     APP_RINGBACK_ON_MS, APP_RINGBACK_OFF_MS);
+        break;
+    case MODE_SETUP_NEEDED: /* US reorder (fast busy): 480 + 620 Hz, 250/250 ms */
+        cadence_tone(s_blk_out, out_n, E.spk.rate, 480.0f, 620.0f, APP_STATUS_TONE_AMPL,
+                     APP_REORDER_ON_MS, APP_REORDER_OFF_MS);
+        break;
+    case MODE_BUSY: /* US busy: 480 + 620 Hz, 500/500 ms */
+        cadence_tone(s_blk_out, out_n, E.spk.rate, 480.0f, 620.0f, APP_STATUS_TONE_AMPL,
+                     APP_BUSY_ON_MS, APP_BUSY_OFF_MS);
+        break;
+    case MODE_NO_WIFI: /* slow single beep */
+        cadence_tone(s_blk_out, out_n, E.spk.rate, APP_NOWIFI_BEEP_HZ, 0.0f, APP_STATUS_TONE_AMPL,
+                     APP_NOWIFI_ON_MS, APP_NOWIFI_OFF_MS);
         break;
     case MODE_CALL:
         if (E.tel_ok) {

@@ -21,8 +21,8 @@
 #include "mbedtls/md5.h"
 
 #include "app_config.h"
+#include "config_store.h"
 #include "rtp.h"
-#include "secrets.h"
 #include "wifi.h"
 
 static const char *TAG = "sip";
@@ -105,9 +105,16 @@ static int64_t now_ms(void)
  * Authorization values are redacted, the destination number is masked.
  * ------------------------------------------------------------------------- */
 
+/* SIP account and destination of the current call, copied from
+ * config_store at call start (provisioning may change them at runtime). */
+static char s_domain[96];
+static char s_user[33];
+static char s_pass[65];
+static char s_dest[20];
+
 static void mask_line(char *line)
 {
-    const char *d = TEST_DEST_NUMBER;
+    const char *d = s_dest;
     if (d[0] == '+') {
         d++;
     }
@@ -425,7 +432,8 @@ static bool auth_param(const char *v, const char *key, char *out, size_t out_len
  * State
  * ------------------------------------------------------------------------- */
 
-typedef enum { CMD_START, CMD_HANGUP } cmd_t;
+/* CMD_START + n = call contact n (0..CFG_MAX_CONTACTS-1). */
+typedef enum { CMD_HANGUP = 0, CMD_START = 1 } cmd_t;
 
 typedef struct {
     bool valid;
@@ -481,6 +489,12 @@ typedef struct {
     int nit_len;
     int64_t nit_start_ms, nit_next_ms;
     uint32_t nit_interval;
+
+    /* outcome, recorded by end_call() */
+    bool failed;              /* never connected: error final, Timer B */
+    int fail_code;            /* SIP status of the failing final, 0 if none */
+    bool remote_bye;
+    int64_t answer_ms;        /* 0 until answered */
 } call_t;
 
 static call_t C;
@@ -492,6 +506,39 @@ static char s_local_ip[16];
 static char s_pub_ip[16];     /* NAT public address learned from Via received= */
 static uint16_t s_pub_port;   /* and rport= */
 static char s_rx[RX_BUF_BYTES + 1];
+
+/* Result of the last call, read by main (busy tone) and the setup page. */
+static portMUX_TYPE s_res_mux = portMUX_INITIALIZER_UNLOCKED;
+static sip_result_t s_result;
+static _Atomic int64_t s_busy_until_ms;
+
+static void record_result(bool failed, int code, bool answered, bool remote, uint32_t talk_ms, const char *why)
+{
+    portENTER_CRITICAL(&s_res_mux);
+    s_result.seq++;
+    s_result.failed = failed;
+    s_result.code = code;
+    s_result.answered = answered;
+    s_result.remote_hangup = remote;
+    s_result.talk_ms = talk_ms;
+    strlcpy(s_result.reason, why, sizeof(s_result.reason));
+    portEXIT_CRITICAL(&s_res_mux);
+    if (failed) {
+        atomic_store(&s_busy_until_ms, now_ms() + APP_BUSY_TONE_MS);
+    }
+}
+
+void sip_last_result(sip_result_t *out)
+{
+    portENTER_CRITICAL(&s_res_mux);
+    *out = s_result;
+    portEXIT_CRITICAL(&s_res_mux);
+}
+
+bool sip_busy_tone_active(void)
+{
+    return now_ms() < atomic_load(&s_busy_until_ms);
+}
 
 const char *sip_call_state_name(call_state_t s)
 {
@@ -522,7 +569,15 @@ static void set_state(call_state_t s, const char *why)
 
 void sip_call_start(void)
 {
-    cmd_t c = CMD_START;
+    sip_call_contact(0);
+}
+
+void sip_call_contact(int idx)
+{
+    if (idx < 0 || idx >= CFG_MAX_CONTACTS) {
+        idx = 0;
+    }
+    cmd_t c = (cmd_t)(CMD_START + idx);
     if (s_cmd_q) {
         xQueueSend(s_cmd_q, &c, 0);
     }
@@ -566,7 +621,7 @@ static void add_auth(sb_t *s, const char *method, const char *uri)
     auth_t *a = &C.auth;
     char tmp[512], ha1[33], ha2[33], resp[33], cnonce[17];
 
-    snprintf(tmp, sizeof(tmp), "%s:%s:%s", SIP_USER, a->realm, SIP_PASSWORD);
+    snprintf(tmp, sizeof(tmp), "%s:%s:%s", s_user, a->realm, s_pass);
     md5_hex(tmp, ha1);
     memset(tmp, 0, sizeof(tmp));
     snprintf(tmp, sizeof(tmp), "%s:%s", method, uri);
@@ -581,7 +636,7 @@ static void add_auth(sb_t *s, const char *method, const char *uri)
     md5_hex(tmp, resp);
 
     sb_printf(s, "%s: Digest username=\"%s\", realm=\"%s\", nonce=\"%s\", uri=\"%s\", response=\"%s\", algorithm=MD5",
-              a->proxy ? "Proxy-Authorization" : "Authorization", SIP_USER, a->realm, a->nonce, uri, resp);
+              a->proxy ? "Proxy-Authorization" : "Authorization", s_user, a->realm, a->nonce, uri, resp);
     if (a->opaque[0]) {
         sb_printf(s, ", opaque=\"%s\"", a->opaque);
     }
@@ -668,7 +723,7 @@ static void via_line(sb_t *s, const char *branch)
 
 static void contact_line(sb_t *s)
 {
-    sb_printf(s, "Contact: <sip:%s@%s:%u>\r\n", SIP_USER, s_pub_ip, s_pub_port);
+    sb_printf(s, "Contact: <sip:%s@%s:%u>\r\n", s_user, s_pub_ip, s_pub_port);
 }
 
 /* New INVITE transaction: fresh branch, current CSeq, auth if challenged. */
@@ -867,6 +922,9 @@ static void respond(const msg_t *m, int code, const char *reason, const char *ex
 
 static void end_call(const char *why)
 {
+    int64_t now = now_ms();
+    record_result(C.failed, C.fail_code, C.answer_ms != 0, C.remote_bye,
+                  C.answer_ms ? (uint32_t)(now - C.answer_ms) : 0, why);
     rtp_session_end();
     C.active = false;
     C.nit_active = false;
@@ -874,33 +932,54 @@ static void end_call(const char *why)
     set_state(CALL_IDLE, why);
 }
 
-static void start_call(void)
+/* A call that could not even start (no WiFi, not set up, DNS). */
+static void start_failed(const char *why)
 {
-    const char *num = TEST_DEST_NUMBER;
-    size_t nl = strlen(num);
-    if (!wifi_is_connected() || !wifi_get_ip(s_local_ip, sizeof(s_local_ip))) {
-        ESP_LOGW(TAG, "no WiFi, cannot call");
+    ESP_LOGW(TAG, "%s", why);
+    record_result(true, 0, false, false, 0, why);
+}
+
+static void start_call(int contact)
+{
+    app_cfg_t cfg;
+    config_get(&cfg);
+    strlcpy(s_domain, cfg.sip_domain, sizeof(s_domain));
+    strlcpy(s_user, cfg.sip_user, sizeof(s_user));
+    strlcpy(s_pass, cfg.sip_pass, sizeof(s_pass));
+    strlcpy(s_dest, cfg.contacts[contact].number, sizeof(s_dest));
+    bool ready = cfg.provisioned;
+    config_wipe(&cfg);
+
+    if (!ready || !s_dest[0]) {
+        start_failed(!ready ? "not set up yet, cannot call" : "no number for this contact");
         return;
     }
-    ESP_LOGI(TAG, "calling ...%s as %s@%s", nl > 4 ? num + nl - 4 : num, SIP_USER, SIP_DOMAIN);
+    const char *num = s_dest;
+    size_t nl = strlen(num);
+    if (!wifi_is_connected() || !wifi_get_ip(s_local_ip, sizeof(s_local_ip))) {
+        start_failed("no WiFi, cannot call");
+        return;
+    }
+    ESP_LOGI(TAG, "calling ...%s as %s@%s", nl > 4 ? num + nl - 4 : num, s_user, s_domain);
 
     struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_DGRAM};
     struct addrinfo *res = NULL;
     char port[8];
     snprintf(port, sizeof(port), "%d", APP_SIP_SERVER_PORT);
-    int err = getaddrinfo(SIP_DOMAIN, port, &hints, &res);
+    int err = getaddrinfo(s_domain, port, &hints, &res);
     if (err != 0 || !res) {
-        ESP_LOGE(TAG, "DNS lookup of %s failed (%d)", SIP_DOMAIN, err);
+        ESP_LOGE(TAG, "DNS lookup of %s failed (%d)", s_domain, err);
         if (res) {
             freeaddrinfo(res);
         }
+        start_failed("DNS lookup of the SIP domain failed");
         return;
     }
     memcpy(&s_server, res->ai_addr, sizeof(s_server));
     freeaddrinfo(res);
     char sip_ip[16];
     inet_ntoa_r(s_server.sin_addr, sip_ip, sizeof(sip_ip));
-    ESP_LOGI(TAG, "SIP server %s -> %s:%d, local %s:%d", SIP_DOMAIN, sip_ip, APP_SIP_SERVER_PORT,
+    ESP_LOGI(TAG, "SIP server %s -> %s:%d, local %s:%d", s_domain, sip_ip, APP_SIP_SERVER_PORT,
              s_local_ip, APP_SIP_LOCAL_PORT);
 
     memset(&C, 0, sizeof(C));
@@ -908,8 +987,8 @@ static void start_call(void)
     rand_hex(rnd, 8);
     snprintf(C.call_id, sizeof(C.call_id), "%s@%s", rnd, s_local_ip);
     rand_hex(C.local_tag, 4);
-    snprintf(C.from_hdr, sizeof(C.from_hdr), "<sip:%s@%s>;tag=%s", SIP_USER, SIP_DOMAIN, C.local_tag);
-    snprintf(C.ruri, sizeof(C.ruri), "sip:%s@%s", TEST_DEST_NUMBER, SIP_DOMAIN);
+    snprintf(C.from_hdr, sizeof(C.from_hdr), "<sip:%s@%s>;tag=%s", s_user, s_domain, C.local_tag);
+    snprintf(C.ruri, sizeof(C.ruri), "sip:%s@%s", s_dest, s_domain);
     snprintf(C.to_hdr, sizeof(C.to_hdr), "<%s>", C.ruri);
     snprintf(C.sdp_sess, sizeof(C.sdp_sess), "%" PRIu32, esp_random() % 1000000000u);
     C.cseq = 1 + esp_random() % 1000;
@@ -1113,6 +1192,7 @@ static void on_invite_response(const msg_t *m)
             return;
         }
         apply_sdp(m, "answer");
+        C.answer_ms = now_ms();
         C.keepalive_ms = now_ms() + APP_SIP_KEEPALIVE_MS;
         set_state(CALL_IN_CALL, "200 OK");
         return;
@@ -1132,13 +1212,15 @@ static void on_invite_response(const msg_t *m)
             send_invite();
             return;
         }
-        ESP_LOGE(TAG, "authentication failed: check SIP_USER / SIP_PASSWORD against the Twilio credential list");
+        ESP_LOGE(TAG, "authentication failed: SIP user / password do not match the Twilio credential list (run setup again)");
     }
     char why[80];
     if (C.hangup_pending) {
         snprintf(why, sizeof(why), "cancelled: %d %.40s", code, m->reason);
     } else {
         snprintf(why, sizeof(why), "call failed: %d %.40s", code, m->reason);
+        C.failed = true;
+        C.fail_code = code;
     }
     end_call(why);
 }
@@ -1217,6 +1299,7 @@ static void on_request(const msg_t *m, const struct sockaddr_in *from)
     } else if (strcmp(m->method, "BYE") == 0) {
         if (ours) {
             respond(m, 200, "OK", NULL, NULL, from);
+            C.remote_bye = true;
             end_call(st == CALL_IN_CALL ? "remote hung up" : "remote BYE");
         } else {
             respond(m, 481, "Call/Transaction Does Not Exist", NULL, NULL, from);
@@ -1253,6 +1336,7 @@ static void run_timers(void)
     /* INVITE: Timer A retransmits until any response, Timer B gives up. */
     if (!C.inv_provisional && C.inv_final == 0) {
         if (now - C.inv_start_ms >= APP_SIP_TIMEOUT_MS) {
+            C.failed = true;
             end_call("no response to INVITE (Timer B)");
             return;
         }
@@ -1322,9 +1406,9 @@ static void sip_task(void *arg)
 
         cmd_t cmd;
         while (xQueueReceive(s_cmd_q, &cmd, 0) == pdTRUE) {
-            if (cmd == CMD_START) {
+            if (cmd >= CMD_START) {
                 if (sip_call_state() == CALL_IDLE) {
-                    start_call();
+                    start_call((int)(cmd - CMD_START));
                 } else {
                     ESP_LOGW(TAG, "call start ignored, state %s", sip_call_state_name(sip_call_state()));
                 }
@@ -1365,6 +1449,5 @@ void sip_start(void)
         ESP_LOGE(TAG, "RTP init failed, calls will have no audio");
     }
     xTaskCreatePinnedToCore(sip_task, "sip", 10240, NULL, 5, NULL, 0);
-    ESP_LOGI(TAG, "SIP UA ready: UDP port %d, server %s:%d, user %s", APP_SIP_LOCAL_PORT, SIP_DOMAIN,
-             APP_SIP_SERVER_PORT, SIP_USER);
+    ESP_LOGI(TAG, "SIP UA ready: UDP port %d (account read from config at each call)", APP_SIP_LOCAL_PORT);
 }
