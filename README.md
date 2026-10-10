@@ -237,12 +237,13 @@ Failure signs:
 
 ## Known issues and bring-up findings (2026-10-10)
 
-- **DHCP never completes** on the bench router: the board associates, the
-  router appears to hand out a lease (the Mac's ARP table showed the board's
-  MAC at an address), but `IP_EVENT_STA_GOT_IP` never fires. Cause not found.
-  Workaround: `WIFI_STATIC_IP` / `WIFI_STATIC_GW` in `secrets.h` skip DHCP
-  (DNS is 8.8.8.8). This has to be fixed before anyone else can use the
-  firmware.
+- **DHCP (resolved):** on 2026-10-10 the bench Tenda router stopped answering
+  DHCP DISCOVERs from the board entirely (lwIP DHCP debug showed DISCOVERs
+  going out and no OFFER ever arriving, even with a different MAC). Power
+  cycling the router fixed it with stock firmware settings. If a board
+  associates but never gets an IP, restart the router first. The optional
+  `WIFI_STATIC_IP` / `WIFI_STATIC_GW` override in `secrets.h` remains for
+  debugging.
 - The AB17X handset's configuration descriptor is larger than 256 bytes:
   `CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE=1024` (in `sdkconfig.defaults`).
 - Its earpiece isochronous OUT endpoint has MPS 384, which none of the IDF
@@ -267,4 +268,33 @@ src/secrets.h         WiFi + SIP credentials, destination number (gitignored; te
 twilio/voice.js       Twilio Function behind the SIP Domain voice URL (allowlist, echo test)
 components/g711/      G.711 mu-law encode/decode (reusable, pure functions)
 components/resampler/ integer-ratio FIR decimator/interpolator (reusable)
+```
+
+## Web installer
+
+`web/` is a static one-click installer page built on ESP Web Tools
+(`esp-web-tools@10.2.1`, loaded from unpkg; no other third-party requests).
+`scripts/build_web_bin.sh` merges bootloader (0x0), partition table (0x8000),
+otadata (only if `partitions.csv` has one) and the app (offset read from
+`partitions.csv`, currently 0x10000) into `web/firmware/kid_phone.bin`, with
+flash mode/freq/size read from `sdkconfig.esp32s3` (dio, 80m, 16MB), and
+writes the version into `web/manifest.json`.
+
+```sh
+scripts/build_web_bin.sh                    # merge the existing build
+scripts/build_web_bin.sh --build            # pio run first, then merge
+scripts/build_web_bin.sh --version 0.3.0    # set the manifest version
+```
+
+`web/firmware/*.bin` is gitignored on purpose: the image contains whatever
+`src/secrets.h` held at build time (WiFi and SIP credentials). Only publish
+an image built with empty secrets, where WiFi comes from Improv Serial and
+Twilio from the phone's setup page. Deploy by uploading `web/` including the
+`.bin`.
+
+Local preview (Web Serial needs https or localhost):
+
+```sh
+python3 -m http.server -d web 8000
+# then open http://localhost:8000 in Chrome or Edge
 ```
