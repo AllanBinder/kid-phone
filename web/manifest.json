@@ -1,0 +1,17 @@
+{
+  "name": "Kid Phone",
+  "version": "dev",
+  "new_install_prompt_erase": true,
+  "new_install_improv_wait_time": 20,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        {
+          "path": "firmware/kid_phone.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}
