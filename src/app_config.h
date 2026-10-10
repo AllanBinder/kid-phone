@@ -5,17 +5,45 @@
  */
 #pragma once
 
-/* Call button: two-lead momentary switch between this GPIO and GND.
- * GPIO 4 is not a strapping pin, not USB (19/20), not octal PSRAM (33-37),
- * not flash (26-32), and not UART0 (43/44). */
-#define APP_BUTTON_GPIO         4
+/* Contact buttons and LEDs: button i calls contact i, LED i shows whether
+ * contact i can be called right now. Any number of them may be wired (one is
+ * fine); an unwired button input idles high on its pull-up and never fires.
+ *
+ * Buttons: momentary switch between the GPIO and GND, internal pull-up.
+ * LEDs: active high, GPIO -> 330 ohm -> LED -> GND (or an LED module with a
+ * built-in resistor).
+ *
+ * Pin choice on the ESP32-S3 N16R8 DevKitC: none of these is a strapping pin
+ * (0, 3, 45, 46), USB (19/20), UART0 (43/44), flash or octal PSRAM (26-37),
+ * JTAG (39-42) or the onboard RGB LED (48). GPIO 4-7 and 15-18 sit next to
+ * each other on the left header, so the buttons share one run and the LEDs
+ * another. 15/16 are the optional 32 kHz crystal pins, unused on the DevKitC. */
+#define APP_NUM_BUTTONS         4
+#define APP_BUTTON_GPIOS        {4, 5, 6, 7}
+#define APP_CONTACT_LED_GPIOS   {15, 16, 17, 18}
 #define APP_BUTTON_DEBOUNCE_MS  30
 #define APP_BUTTON_POLL_MS      5
-/* Holding the button this long while idle cycles the audio test modes A-D. */
+/* Holding button 0 this long while idle cycles the audio test modes A-D. */
 #define APP_BUTTON_LONG_MS      1500
-/* Holding the button this long in any state erases the NVS config (WiFi,
+/* Holding button 0 this long in any state erases the NVS config (WiFi,
  * Twilio, contacts) and reboots into setup. */
 #define APP_FACTORY_RESET_MS    10000
+/* Contact LED blink half-period while that contact is being called. */
+#define APP_CONTACT_LED_BLINK_MS 300
+/* Busy tone length when a button has no contact or the contact is outside
+ * their available hours (no call is placed). */
+#define APP_SHORT_BUSY_MS       2500
+
+/* Availability schedules: re-evaluated this often (and on config changes). */
+#define APP_SCHED_EVAL_MS       1000
+/* SNTP servers (the only non-Twilio hosts the phone talks to). Needs
+ * CONFIG_LWIP_SNTP_MAX_SERVERS >= 2 in sdkconfig.defaults. */
+#define APP_NTP_SERVER_1        "pool.ntp.org"
+#define APP_NTP_SERVER_2        "time.google.com"
+
+/* A call that Twilio answers and then hangs up within this long most likely
+ * never reached the far end (geo permissions, trial account). */
+#define APP_SHORT_CALL_MS       5000
 
 /* Audio block size in milliseconds. Every pass of the audio task moves one
  * block. 10 ms is 80 samples at 8 kHz (half of a 20 ms PCMU RTP frame). */
@@ -131,8 +159,8 @@
 
 /* Setup web server (esp_http_server), port 80, LAN only (station interface). */
 #define APP_HTTP_PORT           80
-#define APP_HTTP_STACK          6144
-#define APP_HTTP_MAX_BODY       1024
+#define APP_HTTP_STACK          8192
+#define APP_HTTP_MAX_BODY       4096
 
 /* Twilio provisioning task. TLS + JSON parsing need a big stack. */
 #define APP_PROV_STACK          16384
@@ -147,7 +175,12 @@
 #define APP_PROV_FN_DEPS        "[{\"name\":\"twilio\",\"version\":\"5.0.0\"}]"
 /* Twilio resource names (rerunning setup finds and reuses these). */
 #define APP_TW_NAME             "kid-phone"
-#define APP_TW_SIP_USER         "handset1"
+/* SIP login of this phone: prefix + last 3 bytes of the WiFi STA MAC in hex
+ * (kidphone-a1b2c3), so several phones can share one Twilio account. */
+#define APP_TW_SIP_USER_PREFIX  "kidphone-"
+/* Login name used by older firmware; provisioning deletes credentials whose
+ * username starts with this from the kid-phone credential list. */
+#define APP_TW_LEGACY_SIP_USER  "handset1"
 #define APP_TW_ENV_NAME         "prod"
 #define APP_TW_FN_NAME          "voice"
 

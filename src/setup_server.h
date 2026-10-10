@@ -3,9 +3,13 @@
  * http://kidphone.local/ (mDNS) or http://<ip>/.
  *
  *   GET  /                 the setup page (one self-contained HTML file in flash)
- *   GET  /api/status       WiFi, Twilio, handset, call and setup progress (JSON)
- *   POST /api/provision    {account_sid, auth_token, contact_name, contact_number}
- *   POST /api/call         test call to contact 0 (same as the button)
+ *   GET  /api/status       WiFi, Twilio, contacts with availability, clock,
+ *                          handset, call and setup progress (JSON)
+ *   POST /api/provision    {account_sid, auth_token, contacts}: Twilio setup;
+ *                          only the numbers if the phone is already set up
+ *   POST /api/contacts     {contacts}: names, button order and schedules, no
+ *                          token; 409 needs_token if the set of numbers changed
+ *   POST /api/call         {contact}: test call (same rules as that button)
  *   POST /api/hangup       hang up
  *
  * No secret is ever returned. POST bodies must be application/json, which a

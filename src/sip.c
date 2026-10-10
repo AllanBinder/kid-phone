@@ -512,20 +512,94 @@ static portMUX_TYPE s_res_mux = portMUX_INITIALIZER_UNLOCKED;
 static sip_result_t s_result;
 static _Atomic int64_t s_busy_until_ms;
 
-static void record_result(bool failed, int code, bool answered, bool remote, uint32_t talk_ms, const char *why)
+static _Atomic int s_contact = -1;
+
+/* Map where and how a call failed to a parent-facing explanation. A 403 is
+ * only a login problem if it answers an INVITE that carried our credentials:
+ * Twilio rejects a wrong password with 403 after digest auth (seen on
+ * 2026-10-10 when two credential lists held the same username). Geo
+ * permission and trial-account blocks happen behind the Function, which has
+ * already answered the SIP leg, so they show up as a very short call. */
+static void classify(sip_result_t *r, bool auth_sent)
 {
+    const char *kind = "", *msg = "";
+    if (r->failed) {
+        switch (r->code) {
+        case 0:
+            if (strstr(r->reason, "not set up")) {
+                kind = "setup";
+                msg = "The phone is not connected to Twilio yet. Finish setup first.";
+            } else {
+                kind = "network";
+                msg = "The phone could not reach Twilio. Check the WiFi and the internet connection.";
+            }
+            break;
+        case 401:
+        case 407:
+            kind = "login";
+            msg = "Twilio rejected the phone's login. Run setup again.";
+            break;
+        case 403:
+            if (auth_sent) {
+                kind = "login";
+                msg = "Twilio rejected the phone's login. Run setup again.";
+            } else {
+                kind = "other";
+                msg = "Twilio refused the call.";
+            }
+            break;
+        case 404:
+            kind = "domain";
+            msg = "Twilio did not find the phone's setup (SIP domain). Run setup again.";
+            break;
+        case 480:
+        case 486:
+        case 600:
+        case 603:
+            kind = "busy";
+            msg = "No answer or busy.";
+            break;
+        default:
+            kind = "other";
+            msg = "The call did not go through.";
+            break;
+        }
+    } else if (r->answered && r->remote_hangup && r->talk_ms < APP_SHORT_CALL_MS) {
+        kind = "unreachable";
+        msg = "Twilio could not reach this number. Check Geo permissions for that country, and on a trial "
+              "account only verified numbers can be called.";
+    }
+    strlcpy(r->kind, kind, sizeof(r->kind));
+    strlcpy(r->message, msg, sizeof(r->message));
+}
+
+static void record_result(bool failed, int code, bool answered, bool remote, uint32_t talk_ms, const char *why,
+                          bool auth_sent)
+{
+    sip_result_t r = {0};
+    r.failed = failed;
+    r.code = code;
+    r.answered = answered;
+    r.remote_hangup = remote;
+    r.talk_ms = talk_ms;
+    r.contact = atomic_load(&s_contact);
+    strlcpy(r.reason, why, sizeof(r.reason));
+    classify(&r, auth_sent);
+    if (r.message[0]) {
+        ESP_LOGW(TAG, "call result: %s (%s%s%d)", r.message, why, code ? ", SIP " : ", code ", code);
+    }
     portENTER_CRITICAL(&s_res_mux);
-    s_result.seq++;
-    s_result.failed = failed;
-    s_result.code = code;
-    s_result.answered = answered;
-    s_result.remote_hangup = remote;
-    s_result.talk_ms = talk_ms;
-    strlcpy(s_result.reason, why, sizeof(s_result.reason));
+    r.seq = s_result.seq + 1;
+    s_result = r;
     portEXIT_CRITICAL(&s_res_mux);
-    if (failed) {
+    if (failed || strcmp(r.kind, "unreachable") == 0) {
         atomic_store(&s_busy_until_ms, now_ms() + APP_BUSY_TONE_MS);
     }
+}
+
+int sip_call_contact_index(void)
+{
+    return sip_call_state() == CALL_IDLE ? -1 : atomic_load(&s_contact);
 }
 
 void sip_last_result(sip_result_t *out)
@@ -565,11 +639,6 @@ static void set_state(call_state_t s, const char *why)
     }
     atomic_store(&s_state, s);
     ESP_LOGI(TAG, "CALL STATE %s -> %s (%s)", sip_call_state_name(old), sip_call_state_name(s), why);
-}
-
-void sip_call_start(void)
-{
-    sip_call_contact(0);
 }
 
 void sip_call_contact(int idx)
@@ -924,7 +993,7 @@ static void end_call(const char *why)
 {
     int64_t now = now_ms();
     record_result(C.failed, C.fail_code, C.answer_ms != 0, C.remote_bye,
-                  C.answer_ms ? (uint32_t)(now - C.answer_ms) : 0, why);
+                  C.answer_ms ? (uint32_t)(now - C.answer_ms) : 0, why, C.auth_tries > 0);
     rtp_session_end();
     C.active = false;
     C.nit_active = false;
@@ -936,7 +1005,7 @@ static void end_call(const char *why)
 static void start_failed(const char *why)
 {
     ESP_LOGW(TAG, "%s", why);
-    record_result(true, 0, false, false, 0, why);
+    record_result(true, 0, false, false, 0, why, false);
 }
 
 static void start_call(int contact)
@@ -949,6 +1018,7 @@ static void start_call(int contact)
     strlcpy(s_dest, cfg.contacts[contact].number, sizeof(s_dest));
     bool ready = cfg.provisioned;
     config_wipe(&cfg);
+    atomic_store(&s_contact, contact);
 
     if (!ready || !s_dest[0]) {
         start_failed(!ready ? "not set up yet, cannot call" : "no number for this contact");
@@ -1000,7 +1070,9 @@ static void start_call(int contact)
     s_pub_port = APP_SIP_LOCAL_PORT;
 
     rtp_session_begin();
-    set_state(CALL_CALLING, "button");
+    char why[24];
+    snprintf(why, sizeof(why), "contact %d", contact);
+    set_state(CALL_CALLING, why);
     send_invite();
 }
 
@@ -1213,6 +1285,9 @@ static void on_invite_response(const msg_t *m)
             return;
         }
         ESP_LOGE(TAG, "authentication failed: SIP user / password do not match the Twilio credential list (run setup again)");
+    } else if (code == 403 && C.auth_tries > 0) {
+        ESP_LOGE(TAG, "403 after digest auth: Twilio rejected the login (wrong password, or another credential "
+                      "list on the domain holds the same username)");
     }
     char why[80];
     if (C.hangup_pending) {

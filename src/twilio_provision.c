@@ -4,16 +4,24 @@
  *
  *   1. GET  Accounts/{SID}.json                      verify SID + token
  *   2. GET  IncomingPhoneNumbers.json                first number with voice = caller ID
- *   3. SIP credential list "kid-phone", credential "handset1" with a fresh
- *      random password (an existing credential's password cannot be read back,
- *      so it is updated on every run)
+ *   3. SIP credential list "kid-phone", credential "kidphone-<last 3 MAC bytes>"
+ *      with a fresh random password (an existing credential's password cannot
+ *      be read back, so it is updated on every run). Credentials named
+ *      "handset1*" (older firmware) are deleted from that list; other
+ *      kidphone-* credentials belong to other phones and are kept.
  *   4. SIP domain friendly name "kid-phone" (else kidphone-<6 hex>.sip.twilio.com),
- *      credential list mapped for call authentication (Auth/Calls)
+ *      credential list mapped for call authentication (Auth/Calls). Warns if
+ *      another list mapped on the domain holds the same username (Twilio may
+ *      then check the wrong password and answer 403).
  *   5. Serverless service "kid-phone", environment "prod", function "voice":
  *      upload twilio/voice.js (embedded at build time) as /voice (protected),
  *      build, wait for the build, set CALLER_ID and ALLOWED, deploy
  *   6. SIP domain VoiceUrl = https://<environment domain>/voice
  *   7. Save SIP domain/user/password, caller ID and contacts to NVS
+ *
+ * Numbers-only run (contacts changed on an already set up phone): 1, find the
+ * service and environment, set ALLOWED, redeploy the environment's current
+ * build, save the contacts. Falls back to the full run if anything is missing.
  *
  * Not changed by the device: Twilio's per-country Voice geographic permissions
  * (Console > Voice > Settings > Geo permissions). Calls abroad fail until the
@@ -37,6 +45,7 @@
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_random.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
@@ -129,7 +138,8 @@ typedef struct {
     char sid[40];
     char auth[160];            /* "Basic base64(sid:token)" */
     cfg_contact_t contacts[CFG_MAX_CONTACTS];
-    int ncontacts;
+    bool numbers_only;
+    char sip_user[33];
 
     char caller_id[20];
     char cl_sid[40];
@@ -143,6 +153,8 @@ typedef struct {
     char fn_sid[40];
     char fnv_sid[40];
     char build_sid[40];
+    char other_lists[4][40];   /* other credential lists mapped on the domain */
+    int n_other_lists;
 
     /* last response */
     int status;
@@ -284,7 +296,8 @@ static bool http(prov_t *p, esp_http_client_method_t method, const char *url, co
     }
     /* Log the URL path without query; never the body (it can hold the SIP password). */
     const char *path = strstr(url, ".com");
-    ESP_LOGI(TAG, "%s %.*s -> %d%s%s", method == HTTP_METHOD_GET ? "GET" : "POST",
+    ESP_LOGI(TAG, "%s %.*s -> %d%s%s",
+             method == HTTP_METHOD_GET ? "GET" : (method == HTTP_METHOD_DELETE ? "DELETE" : "POST"),
              path ? (int)strcspn(path + 4, "?") : 0, path ? path + 4 : "", p->status,
              p->tw_msg[0] ? " " : "", p->tw_msg);
     return ok;
@@ -298,6 +311,11 @@ static bool get(prov_t *p, const char *url)
 static bool post_form(prov_t *p, const char *url, const char *form)
 {
     return http(p, HTTP_METHOD_POST, url, "application/x-www-form-urlencoded", form, (int)strlen(form));
+}
+
+static bool del(prov_t *p, const char *url)
+{
+    return http(p, HTTP_METHOD_DELETE, url, NULL, NULL, 0);
 }
 
 /* ---------------------------------------------------------------------------
@@ -446,6 +464,13 @@ static bool step_number(prov_t *p)
                 "(pick one with Voice). Then press Connect again.");
 }
 
+void twilio_sip_username(char *out, size_t len)
+{
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(out, len, APP_TW_SIP_USER_PREFIX "%02x%02x%02x", mac[3], mac[4], mac[5]);
+}
+
 static bool step_credentials(prov_t *p)
 {
     step("Creating the phone's private login...");
@@ -464,23 +489,54 @@ static bool step_credentials(prov_t *p)
         }
     }
 
-    gen_password(p->sip_pass, sizeof(p->sip_pass));
     snprintf(p->url, sizeof(p->url), API "%s/SIP/CredentialLists/%s/Credentials.json?PageSize=100", p->sid,
              p->cl_sid);
     if (!get(p, p->url)) {
         return fail_api(p, "Listing credentials");
     }
-    const cJSON *cr = find_by(p, "username", APP_TW_SIP_USER);
+    /* Our own credential, and logins left behind by older firmware
+     * ("handset1"): those are removed so only one password per name exists.
+     * Other kidphone-* credentials are other phones on this account. */
+    char legacy[4][40];
+    int nlegacy = 0;
+    const cJSON *it;
+    cJSON_ArrayForEach(it, list_of(p)) {
+        const cJSON *u = cJSON_GetObjectItem(it, "username");
+        if (!cJSON_IsString(u)) {
+            continue;
+        }
+        if (strcmp(u->valuestring, p->sip_user) == 0) {
+            copy_field(it, "sid", p->cr_sid, sizeof(p->cr_sid));
+        } else if (strncmp(u->valuestring, APP_TW_LEGACY_SIP_USER, strlen(APP_TW_LEGACY_SIP_USER)) == 0 &&
+                   nlegacy < 4) {
+            copy_field(it, "sid", legacy[nlegacy], sizeof(legacy[nlegacy]));
+            nlegacy++;
+        }
+    }
+    for (int i = 0; i < nlegacy; i++) {
+        if (!legacy[i][0]) {
+            continue;
+        }
+        snprintf(p->url, sizeof(p->url), API "%.34s/SIP/CredentialLists/%.34s/Credentials/%.34s.json", p->sid,
+                 p->cl_sid, legacy[i]);
+        if (del(p, p->url) || p->status == 404) {
+            step("Removed the old login \"" APP_TW_LEGACY_SIP_USER "\" from earlier firmware");
+        } else {
+            return fail_api(p, "Removing the old login");
+        }
+    }
+
+    gen_password(p->sip_pass, sizeof(p->sip_pass));
     p->body[0] = '\0';
     form_add(p->body, sizeof(p->body), "Password", p->sip_pass);
     bool ok;
-    if (cr && copy_field(cr, "sid", p->cr_sid, sizeof(p->cr_sid))) {
+    if (p->cr_sid[0]) {
         /* Existing password cannot be read back: set a fresh one. */
         snprintf(p->url, sizeof(p->url), API "%s/SIP/CredentialLists/%s/Credentials/%s.json", p->sid, p->cl_sid,
                  p->cr_sid);
         ok = post_form(p, p->url, p->body);
     } else {
-        form_add(p->body, sizeof(p->body), "Username", APP_TW_SIP_USER);
+        form_add(p->body, sizeof(p->body), "Username", p->sip_user);
         snprintf(p->url, sizeof(p->url), API "%s/SIP/CredentialLists/%s/Credentials.json", p->sid, p->cl_sid);
         ok = post_form(p, p->url, p->body);
     }
@@ -488,8 +544,47 @@ static bool step_credentials(prov_t *p)
     if (!ok) {
         return fail_api(p, "Saving the phone's login");
     }
-    step("Login ready (user %s)", APP_TW_SIP_USER);
+    step("Login ready (user %s)", p->sip_user);
     return true;
+}
+
+/* Collect credential lists mapped on the domain other than ours, from the
+ * mapping list in p->json (both the Auth/Calls and the legacy mapping APIs). */
+static void collect_other_lists(prov_t *p)
+{
+    const cJSON *it;
+    cJSON_ArrayForEach(it, list_of(p)) {
+        char sid[40];
+        if (!copy_field(it, "sid", sid, sizeof(sid)) || strcmp(sid, p->cl_sid) == 0) {
+            continue;
+        }
+        bool dup = false;
+        for (int i = 0; i < p->n_other_lists; i++) {
+            dup |= strcmp(p->other_lists[i], sid) == 0;
+        }
+        if (!dup && p->n_other_lists < 4) {
+            strlcpy(p->other_lists[p->n_other_lists++], sid, sizeof(p->other_lists[0]));
+        }
+    }
+}
+
+/* Twilio checks the password of the first credential it finds with the
+ * username, in any list mapped on the domain. A second list holding the same
+ * username makes calls fail with 403 after a correct-looking login. */
+static void warn_duplicate_logins(prov_t *p)
+{
+    for (int i = 0; i < p->n_other_lists; i++) {
+        snprintf(p->url, sizeof(p->url), API "%.34s/SIP/CredentialLists/%.34s/Credentials.json?PageSize=100",
+                 p->sid, p->other_lists[i]);
+        if (!get(p, p->url)) {
+            continue; /* a warning only: never fail setup over it */
+        }
+        if (find_by(p, "username", p->sip_user)) {
+            step("Warning: another credential list on this SIP domain (%.34s) also has the login %s. Twilio may "
+                 "check the wrong password. Remove it there or unmap that list.",
+                 p->other_lists[i], p->sip_user);
+        }
+    }
 }
 
 static bool step_domain(prov_t *p)
@@ -531,13 +626,21 @@ static bool step_domain(prov_t *p)
     if (!get(p, p->url)) {
         return fail_api(p, "Reading the domain's call authentication");
     }
-    if (!p->resp || !strstr(p->resp, p->cl_sid)) {
+    bool mapped = p->resp && strstr(p->resp, p->cl_sid);
+    collect_other_lists(p);
+    if (!mapped) {
         p->body[0] = '\0';
         form_add(p->body, sizeof(p->body), "CredentialListSid", p->cl_sid);
         if (!post_form(p, p->url, p->body)) {
             return fail_api(p, "Linking the login to the SIP domain");
         }
     }
+    /* Lists mapped through the older (non Auth/Calls) mapping API count too. */
+    snprintf(p->url, sizeof(p->url), API "%s/SIP/Domains/%s/CredentialListMappings.json", p->sid, p->sd_sid);
+    if (get(p, p->url)) {
+        collect_other_lists(p);
+    }
+    warn_duplicate_logins(p);
     step("Calling address ready: %s", p->domain);
     return true;
 }
@@ -610,6 +713,21 @@ static bool set_variable(prov_t *p, const char *key, const char *value)
         return fail_api(p, "Saving settings");
     }
     return true;
+}
+
+/* ALLOWED: comma separated numbers of all used contact slots. */
+static void allowed_list(const prov_t *p, char *out, size_t len)
+{
+    out[0] = '\0';
+    for (int i = 0; i < CFG_MAX_CONTACTS; i++) {
+        if (!p->contacts[i].number[0]) {
+            continue;
+        }
+        if (out[0]) {
+            strlcat(out, ",", len);
+        }
+        strlcat(out, p->contacts[i].number, len);
+    }
 }
 
 static bool step_serverless(prov_t *p)
@@ -687,13 +805,8 @@ static bool step_serverless(prov_t *p)
     step("Build finished");
 
     /* Environment variables: who may be called, and the number calls come from. */
-    char allowed[CFG_MAX_CONTACTS * 21] = "";
-    for (int i = 0; i < p->ncontacts; i++) {
-        if (i) {
-            strlcat(allowed, ",", sizeof(allowed));
-        }
-        strlcat(allowed, p->contacts[i].number, sizeof(allowed));
-    }
+    char allowed[CFG_MAX_CONTACTS * 21];
+    allowed_list(p, allowed, sizeof(allowed));
     if (!set_variable(p, "CALLER_ID", p->caller_id) || !set_variable(p, "ALLOWED", allowed)) {
         return false;
     }
@@ -728,20 +841,86 @@ static bool step_voice_url(prov_t *p)
  * Task
  * ------------------------------------------------------------------------- */
 
-static void prov_task(void *arg)
+/*
+ * Numbers-only update: find service and environment, set ALLOWED, redeploy
+ * the build that is live now. Returns 1 done, 0 failed (error set), -1 fall
+ * back to the full setup (something the quick path needs is missing).
+ */
+static int quick_numbers(prov_t *p)
 {
-    prov_t *p = arg;
+    if (!step_verify(p)) {
+        return 0;
+    }
+    step("Updating who the phone may call...");
+    snprintf(p->url, sizeof(p->url), SLS "?PageSize=100");
+    if (!get(p, p->url)) {
+        (void)fail_api(p, "Finding the call program");
+        return 0;
+    }
+    const cJSON *svc = find_by(p, "unique_name", APP_TW_NAME);
+    if (!svc || !copy_field(svc, "sid", p->svc_sid, sizeof(p->svc_sid))) {
+        return -1;
+    }
+    snprintf(p->url, sizeof(p->url), SLS "/%s/Environments?PageSize=100", p->svc_sid);
+    if (!get(p, p->url)) {
+        (void)fail_api(p, "Finding the call program");
+        return 0;
+    }
+    const cJSON *env = find_by(p, "unique_name", APP_TW_ENV_NAME);
+    if (!env || !copy_field(env, "sid", p->env_sid, sizeof(p->env_sid)) ||
+        !copy_field(env, "build_sid", p->build_sid, sizeof(p->build_sid))) {
+        return -1;
+    }
+    char allowed[CFG_MAX_CONTACTS * 21];
+    allowed_list(p, allowed, sizeof(allowed));
+    if (!set_variable(p, "ALLOWED", allowed)) {
+        return 0;
+    }
+    /* Variables only take effect with a new deployment. */
+    p->body[0] = '\0';
+    form_add(p->body, sizeof(p->body), "BuildSid", p->build_sid);
+    snprintf(p->url, sizeof(p->url), SLS "/%s/Environments/%s/Deployments", p->svc_sid, p->env_sid);
+    if (!post_form(p, p->url, p->body)) {
+        (void)fail_api(p, "Deploying the call program");
+        return 0;
+    }
+    if (config_set_contacts(p->contacts) != ESP_OK) {
+        (void)fail(p, "Could not save the settings on the phone.", "Restart the phone and try again.");
+        return 0;
+    }
+    step("Numbers updated. Twilio takes a few seconds to switch over.");
+    return 1;
+}
+
+static bool full_setup(prov_t *p)
+{
     bool ok = step_verify(p) && step_number(p) && step_credentials(p) && step_domain(p) && step_serverless(p) &&
               step_voice_url(p);
     clear_resp(p);
-    if (ok) {
-        if (config_set_twilio(p->domain, APP_TW_SIP_USER, p->sip_pass, p->caller_id, p->contacts, p->ncontacts) !=
-            ESP_OK) {
-            ok = fail(p, "Could not save the settings on the phone.", "Restart the phone and run setup again.");
-        } else {
-            step("All set! Pick up the handset: you should hear a dial tone.");
-        }
+    if (!ok) {
+        return false;
     }
+    if (config_set_twilio(p->sid, p->domain, p->sip_user, p->sip_pass, p->caller_id, p->contacts) != ESP_OK) {
+        return fail(p, "Could not save the settings on the phone.", "Restart the phone and run setup again.");
+    }
+    step("All set! Pick up the handset: you should hear a dial tone.");
+    return true;
+}
+
+static void prov_task(void *arg)
+{
+    prov_t *p = arg;
+    bool ok;
+    int q = p->numbers_only ? quick_numbers(p) : -1;
+    if (q < 0) {
+        if (p->numbers_only) {
+            step("Running the full setup instead...");
+        }
+        ok = full_setup(p);
+    } else {
+        ok = q == 1;
+    }
+    clear_resp(p);
     /* The token (inside p->auth) and the SIP password go away here. */
     mbedtls_platform_zeroize(p, sizeof(*p));
     free(p);
@@ -753,10 +932,10 @@ static void prov_task(void *arg)
 }
 
 bool twilio_provision_start(const char *account_sid, const char *auth_token, const cfg_contact_t *contacts,
-                            int n)
+                            bool numbers_only)
 {
     ensure_lock();
-    if (n < 1 || n > CFG_MAX_CONTACTS || !account_sid || !auth_token) {
+    if (!contacts || !config_any_contact(contacts) || !account_sid || !auth_token) {
         return false;
     }
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -783,8 +962,9 @@ bool twilio_provision_start(const char *account_sid, const char *auth_token, con
                           (size_t)ul);
     p->auth[6 + olen] = '\0';
     mbedtls_platform_zeroize(up, sizeof(up));
-    memcpy(p->contacts, contacts, sizeof(cfg_contact_t) * (size_t)n);
-    p->ncontacts = n;
+    memcpy(p->contacts, contacts, sizeof(p->contacts));
+    p->numbers_only = numbers_only;
+    twilio_sip_username(p->sip_user, sizeof(p->sip_user));
 
     if (xTaskCreatePinnedToCore(prov_task, "provision", APP_PROV_STACK, p, 4, NULL, 0) != pdPASS) {
         mbedtls_platform_zeroize(p, sizeof(*p));

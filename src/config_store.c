@@ -19,6 +19,25 @@ static const char *NS = "kidphone";
 
 static app_cfg_t s_cfg;
 static SemaphoreHandle_t s_lock;
+static uint32_t s_gen;
+
+/* Stored schedule (NVS blob "c<i>_sch"). Fixed layout, versioned so a later
+ * firmware can extend it; a blob with an unknown version or size is ignored
+ * (the contact is then always available). */
+#define SCHED_BLOB_VERSION 1
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t enabled;
+    uint8_t nwin;
+    char tz[48];
+    char tz_name[40];
+    struct __attribute__((packed)) {
+        uint8_t days;
+        uint16_t start_min;
+        uint16_t end_min;
+    } win[CFG_MAX_WINDOWS];
+} sched_blob_t;
+_Static_assert(sizeof(sched_blob_t) == 111, "schedule blob layout changed: bump SCHED_BLOB_VERSION");
 
 static void lock(void)
 {
@@ -38,6 +57,77 @@ static void get_str(nvs_handle_t h, const char *key, char *out, size_t len)
     }
 }
 
+static void sched_from_blob(const sched_blob_t *b, cfg_schedule_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->enabled = b->enabled != 0;
+    memcpy(out->tz, b->tz, sizeof(out->tz));
+    out->tz[sizeof(out->tz) - 1] = '\0';
+    memcpy(out->tz_name, b->tz_name, sizeof(out->tz_name));
+    out->tz_name[sizeof(out->tz_name) - 1] = '\0';
+    out->nwin = b->nwin > CFG_MAX_WINDOWS ? CFG_MAX_WINDOWS : b->nwin;
+    for (int i = 0; i < out->nwin; i++) {
+        out->win[i].days = b->win[i].days & 0x7f;
+        out->win[i].start_min = b->win[i].start_min % 1440;
+        out->win[i].end_min = b->win[i].end_min % 1440;
+    }
+}
+
+static void sched_to_blob(const cfg_schedule_t *in, sched_blob_t *b)
+{
+    memset(b, 0, sizeof(*b));
+    b->version = SCHED_BLOB_VERSION;
+    b->enabled = in->enabled;
+    strlcpy(b->tz, in->tz, sizeof(b->tz));
+    strlcpy(b->tz_name, in->tz_name, sizeof(b->tz_name));
+    b->nwin = in->nwin > CFG_MAX_WINDOWS ? CFG_MAX_WINDOWS : in->nwin;
+    for (int i = 0; i < b->nwin; i++) {
+        b->win[i].days = in->win[i].days;
+        b->win[i].start_min = in->win[i].start_min;
+        b->win[i].end_min = in->win[i].end_min;
+    }
+}
+
+static void load_sched(nvs_handle_t h, int idx, cfg_schedule_t *out)
+{
+    char k[12];
+    snprintf(k, sizeof(k), "c%d_sch", idx);
+    sched_blob_t b;
+    size_t n = sizeof(b);
+    memset(out, 0, sizeof(*out));
+    if (nvs_get_blob(h, k, &b, &n) == ESP_OK && n == sizeof(b) && b.version == SCHED_BLOB_VERSION) {
+        sched_from_blob(&b, out);
+    }
+}
+
+/* Write names, numbers and schedules of all slots (caller holds the lock). */
+static esp_err_t save_contacts_locked(nvs_handle_t h)
+{
+    esp_err_t err = ESP_OK;
+    for (int i = 0; i < CFG_MAX_CONTACTS; i++) {
+        char k[12];
+        snprintf(k, sizeof(k), "c%d_name", i);
+        err |= nvs_set_str(h, k, s_cfg.contacts[i].name);
+        snprintf(k, sizeof(k), "c%d_num", i);
+        err |= nvs_set_str(h, k, s_cfg.contacts[i].number);
+        snprintf(k, sizeof(k), "c%d_sch", i);
+        sched_blob_t b;
+        sched_to_blob(&s_cfg.contacts[i].sched, &b);
+        err |= nvs_set_blob(h, k, &b, sizeof(b));
+    }
+    return err;
+}
+
+bool config_any_contact(const cfg_contact_t *contacts)
+{
+    for (int i = 0; i < CFG_MAX_CONTACTS; i++) {
+        if (contacts[i].number[0]) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void load(void)
 {
     memset(&s_cfg, 0, sizeof(s_cfg));
@@ -51,18 +141,20 @@ static void load(void)
     get_str(h, "sip_user", s_cfg.sip_user, sizeof(s_cfg.sip_user));
     get_str(h, "sip_pass", s_cfg.sip_pass, sizeof(s_cfg.sip_pass));
     get_str(h, "caller_id", s_cfg.caller_id, sizeof(s_cfg.caller_id));
+    get_str(h, "tw_sid", s_cfg.account_sid, sizeof(s_cfg.account_sid));
     for (int i = 0; i < CFG_MAX_CONTACTS; i++) {
         char k[12];
         snprintf(k, sizeof(k), "c%d_name", i);
         get_str(h, k, s_cfg.contacts[i].name, sizeof(s_cfg.contacts[i].name));
         snprintf(k, sizeof(k), "c%d_num", i);
         get_str(h, k, s_cfg.contacts[i].number, sizeof(s_cfg.contacts[i].number));
+        load_sched(h, i, &s_cfg.contacts[i].sched);
     }
     uint8_t p = 0;
     nvs_get_u8(h, "provisioned", &p);
-    /* Only trust the flag if the SIP account and contact 0 are really there. */
+    /* Only trust the flag if the SIP account and a contact are really there. */
     s_cfg.provisioned = p == 1 && s_cfg.sip_domain[0] && s_cfg.sip_user[0] && s_cfg.sip_pass[0] &&
-                        s_cfg.contacts[0].number[0];
+                        config_any_contact(s_cfg.contacts);
     nvs_close(h);
 }
 
@@ -102,7 +194,8 @@ static void seed_from_secrets(void)
 #else
         const char *cid = "";
 #endif
-        config_set_twilio(SIP_DOMAIN, SIP_USER, SIP_PASSWORD, cid, &c, 1);
+        cfg_contact_t all[CFG_MAX_CONTACTS] = {c};
+        config_set_twilio("", SIP_DOMAIN, SIP_USER, SIP_PASSWORD, cid, all);
     }
 #endif
 }
@@ -122,11 +215,16 @@ void config_store_init(void)
     unlock();
     seed_from_secrets();
 
-    const char *n = s_cfg.contacts[0].number;
-    size_t nl = strlen(n);
-    ESP_LOGI(TAG, "config: wifi %s, twilio %s, contact 0 %s%s", s_cfg.wifi_ssid[0] ? "set" : "NOT SET",
-             s_cfg.provisioned ? "provisioned" : "NOT SET UP", nl > 4 ? "..." : (nl ? "" : "none"),
-             nl > 4 ? n + nl - 4 : n);
+    ESP_LOGI(TAG, "config: wifi %s, twilio %s", s_cfg.wifi_ssid[0] ? "set" : "NOT SET",
+             s_cfg.provisioned ? "provisioned" : "NOT SET UP");
+    for (int i = 0; i < CFG_MAX_CONTACTS; i++) {
+        const char *n = s_cfg.contacts[i].number;
+        size_t nl = strlen(n);
+        if (nl) {
+            ESP_LOGI(TAG, "contact %d: ...%s, schedule %s", i, nl > 4 ? n + nl - 4 : n,
+                     s_cfg.contacts[i].sched.enabled ? "on" : "off (always available)");
+        }
+    }
 }
 
 void config_get(app_cfg_t *out)
@@ -157,6 +255,14 @@ bool config_is_provisioned(void)
     return r;
 }
 
+uint32_t config_generation(void)
+{
+    lock();
+    uint32_t g = s_gen;
+    unlock();
+    return g;
+}
+
 bool config_get_contact(int idx, cfg_contact_t *out)
 {
     if (idx < 0 || idx >= CFG_MAX_CONTACTS) {
@@ -182,6 +288,7 @@ esp_err_t config_set_wifi(const char *ssid, const char *pass)
     if (err == ESP_OK) {
         err = nvs_set_str(h, "wifi_pass", s_cfg.wifi_pass);
     }
+    s_gen++;
     unlock();
     if (err == ESP_OK) {
         err = nvs_commit(h);
@@ -193,8 +300,8 @@ esp_err_t config_set_wifi(const char *ssid, const char *pass)
     return err;
 }
 
-esp_err_t config_set_twilio(const char *sip_domain, const char *sip_user, const char *sip_pass,
-                            const char *caller_id, const cfg_contact_t *contacts, int n)
+esp_err_t config_set_twilio(const char *account_sid, const char *sip_domain, const char *sip_user,
+                            const char *sip_pass, const char *caller_id, const cfg_contact_t *contacts)
 {
     nvs_handle_t h;
     esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
@@ -202,37 +309,52 @@ esp_err_t config_set_twilio(const char *sip_domain, const char *sip_user, const 
         return err;
     }
     lock();
+    copy_str(s_cfg.account_sid, sizeof(s_cfg.account_sid), account_sid);
     copy_str(s_cfg.sip_domain, sizeof(s_cfg.sip_domain), sip_domain);
     copy_str(s_cfg.sip_user, sizeof(s_cfg.sip_user), sip_user);
     copy_str(s_cfg.sip_pass, sizeof(s_cfg.sip_pass), sip_pass);
     copy_str(s_cfg.caller_id, sizeof(s_cfg.caller_id), caller_id);
-    for (int i = 0; i < CFG_MAX_CONTACTS; i++) {
-        if (i < n) {
-            s_cfg.contacts[i] = contacts[i];
-        } else {
-            memset(&s_cfg.contacts[i], 0, sizeof(s_cfg.contacts[i]));
-        }
-    }
+    memcpy(s_cfg.contacts, contacts, sizeof(s_cfg.contacts));
+    err |= nvs_set_str(h, "tw_sid", s_cfg.account_sid);
     err |= nvs_set_str(h, "sip_domain", s_cfg.sip_domain);
     err |= nvs_set_str(h, "sip_user", s_cfg.sip_user);
     err |= nvs_set_str(h, "sip_pass", s_cfg.sip_pass);
     err |= nvs_set_str(h, "caller_id", s_cfg.caller_id);
-    for (int i = 0; i < CFG_MAX_CONTACTS; i++) {
-        char k[12];
-        snprintf(k, sizeof(k), "c%d_name", i);
-        err |= nvs_set_str(h, k, s_cfg.contacts[i].name);
-        snprintf(k, sizeof(k), "c%d_num", i);
-        err |= nvs_set_str(h, k, s_cfg.contacts[i].number);
-    }
+    err |= save_contacts_locked(h);
     err |= nvs_set_u8(h, "provisioned", 1);
     if (err == ESP_OK) {
         err = nvs_commit(h);
     }
-    s_cfg.provisioned = err == ESP_OK && s_cfg.contacts[0].number[0];
+    s_cfg.provisioned = err == ESP_OK && config_any_contact(s_cfg.contacts);
+    s_gen++;
     unlock();
     nvs_close(h);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "saving Twilio config failed");
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+esp_err_t config_set_contacts(const cfg_contact_t *contacts)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    lock();
+    memcpy(s_cfg.contacts, contacts, sizeof(s_cfg.contacts));
+    err = save_contacts_locked(h);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    s_cfg.provisioned = s_cfg.provisioned && config_any_contact(s_cfg.contacts);
+    s_gen++;
+    unlock();
+    nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "saving contacts failed");
         return ESP_FAIL;
     }
     return ESP_OK;
@@ -251,6 +373,7 @@ esp_err_t config_factory_reset(void)
     }
     lock();
     mbedtls_platform_zeroize(&s_cfg, sizeof(s_cfg));
+    s_gen++;
     unlock();
     ESP_LOGW(TAG, "factory reset: config erased (%s)", esp_err_to_name(err));
     return err;

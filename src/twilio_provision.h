@@ -11,15 +11,25 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "cJSON.h"
 #include "config_store.h"
 
 /* Start provisioning. Copies all inputs (the caller wipes its own copy of the
- * token). n contacts from contacts[0]. Returns false if a run is already in
- * progress or the inputs are unusable. */
+ * token). contacts = CFG_MAX_CONTACTS slots (empty number = unused), at least
+ * one with a number. Returns false if a run is already in progress or the
+ * inputs are unusable.
+ *
+ * numbers_only: the phone is already set up and only the set of numbers
+ * changed. Then only ALLOWED is updated and the deployed build redeployed
+ * (a few seconds instead of a minute); if anything the quick path needs is
+ * missing in Twilio it falls back to the full setup. */
 bool twilio_provision_start(const char *account_sid, const char *auth_token, const cfg_contact_t *contacts,
-                            int n);
+                            bool numbers_only);
+
+/* This phone's SIP login: APP_TW_SIP_USER_PREFIX + last 3 MAC bytes in hex. */
+void twilio_sip_username(char *out, size_t len);
 
 bool twilio_provision_running(void);
 
