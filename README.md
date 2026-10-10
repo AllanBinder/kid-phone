@@ -3,8 +3,10 @@
 Toddler phone. An ESP32-S3 is USB host to a LIXADA retro telephone handset
 (USB Audio Class, "AB17X USB Audio", VID:PID 001f:0b23) and a minimal SIP
 client over WiFi to a Twilio SIP Domain in the parent's own Twilio account.
-Pick up the handset, hear a dial tone, press the button, and the phone calls
-the family contact (G.711 mu-law, 8 kHz, RTP over UDP).
+Pick up the handset, hear a dial tone, press a button, and the phone calls
+that family member (G.711 mu-law, 8 kHz, RTP over UDP). Up to four buttons,
+one per person, each with a light that shows whether that person can be
+called right now (optional availability schedule in their own time zone).
 
 A non-technical parent sets it up with no toolchain: flash from a browser,
 type the WiFi name and password in the browser, then paste their Twilio
@@ -15,20 +17,33 @@ everything it needs in their Twilio account by itself.
 
 You need: a computer with Chrome or Edge, a Twilio account with one phone
 number that can make calls (Console > Phone Numbers > Buy a number), and the
-number of the person the phone should call.
+numbers of the one to four people the phone should call.
 
 1. Plug the phone's **COM** USB port into the computer. Open the installer
    page, press **Connect**, pick the port, choose **Install**.
 2. When asked, type your WiFi name and password. The phone joins your WiFi.
 3. Press **Visit device** (or open `http://kidphone.local/`). On that page,
-   paste the **Account SID** and **Auth Token** from the Twilio Console home
-   page, type who to call and their number (`+1 555 123 4567` style), press
-   **Connect**. Setup takes about a minute.
-4. Press **Test call**, or plug in the handset, pick it up, and press the button.
+   fill in who each button calls (name and number, `+1 555 123 4567` style;
+   one person is enough), paste the **Account SID** and **Auth Token** from
+   the Twilio Console home page, press **Connect**. Setup takes about a minute.
+4. Press **Call ...**, or plug in the handset, pick it up, and press a button.
 
-If the person to call is in another country, turn that country on in the
-Twilio Console under Voice > Settings > Geo permissions. The phone does not
-change that setting. To start over, hold the button for 10 seconds.
+Later changes: names, which button calls whom, and available times are saved
+with **Save** and need no token. Adding or changing a phone number asks for
+the Auth Token again, because the Twilio Function only dials numbers on its
+allowed list; the phone then updates that list in a few seconds.
+
+**Only when they're available** (per person, optional): pick their time zone
+and the times they are happy to take calls (presets "Weekday evenings",
+"Weekend mornings", "Every day, daytime", or custom days and times, up to
+four; a time like 22:00 to 01:00 runs past midnight). Outside those times
+that person's light is off and their button plays a short busy tone instead
+of calling. Until the phone's clock has synced from the internet, everyone
+counts as available (a clock problem never blocks a call).
+
+If a person is in another country, turn that country on in the Twilio
+Console under Voice > Settings > Geo permissions. The phone does not change
+that setting. To start over, hold the first button for 10 seconds.
 
 What the handset and the light tell you:
 
@@ -36,11 +51,15 @@ What the handset and the light tell you:
 |---|---|---|
 | slow quiet beep every 3 s | red blinking | no WiFi |
 | fast busy (480 + 620 Hz, 250 ms on/off) | blue | WiFi OK, Twilio not set up yet |
-| dial tone | green | ready, press the button to call |
+| dial tone | green | ready, press a button to call |
 | busy (480 + 620 Hz, 500 ms on/off) for 5 s | | the last call failed |
 | | blue pulsing | Twilio setup running |
 | | white pulsing | in a call |
-| | amber fast blink | button held: keep holding to erase everything |
+| | amber fast blink | first button held: keep holding to erase everything |
+| busy for 2.5 s after a press | | that button has nobody set up, or the person is outside their available hours |
+
+Contact lights: on = can be called now, off = not set up or outside their
+hours, blinking = being called.
 
 ## Hardware
 
@@ -59,9 +78,25 @@ What the handset and the light tell you:
   back-feed 5 V), and do not feed a second supply into the 5V header pin.
 - Symptom of a missing bridge: `HPRT ... conn=0 ... D+=0 D-=0` and no USB
   activity at all, even though the handset works on a computer.
-- **Call button**: one lead to **GPIO 4**, the other lead to **GND**. No
-  resistor needed (internal pull-up, software debounce of 30 ms). GPIO 4 is
-  not a strapping pin, not USB, not PSRAM, not flash.
+- **Buttons and lights** (`APP_BUTTON_GPIOS`, `APP_CONTACT_LED_GPIOS` in
+  `src/app_config.h`). Wire as many as you have people; one is fine, unwired
+  buttons never fire (internal pull-up) and unwired lights do nothing.
+
+  | Person | Button (other lead to GND) | Light (GPIO -> 330 ohm -> LED -> GND) |
+  |---|---|---|
+  | 1 (also test modes and factory reset) | GPIO 4 | GPIO 15 |
+  | 2 | GPIO 5 | GPIO 16 |
+  | 3 | GPIO 6 | GPIO 17 |
+  | 4 | GPIO 7 | GPIO 18 |
+
+  Buttons need no resistor (internal pull-up, 30 ms software debounce).
+  Lights are active high: GPIO to a 330 ohm resistor to the LED's long leg
+  (anode), short leg to GND. For a solderless build use LED modules with a
+  built-in resistor (signal to the GPIO, minus to GND). All eight pins sit
+  in one run on the DevKitC's left header (4, 5, 6, 7, 15, 16, 17, 18) and
+  avoid strapping pins (0, 3, 45, 46), USB (19/20), UART0 (43/44), flash and
+  octal PSRAM (26-37), JTAG (39-42) and the RGB LED (48). 15/16 are the
+  optional 32 kHz crystal pins, unused on this board.
 
 ## Build, flash, monitor
 
@@ -91,9 +126,9 @@ If the upload cannot connect, hold BOOT, tap RST, release BOOT, and retry.
 Ctrl-C quits the monitor. After editing `sdkconfig.defaults`, delete
 `sdkconfig.esp32s3` so the change is picked up.
 
-After editing `sdkconfig.defaults` (this branch adds
-`CONFIG_LWIP_MAX_SOCKETS=16` and `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y`),
-delete `sdkconfig.esp32s3` so the change is picked up.
+`sdkconfig.defaults` adds, among others, `CONFIG_LWIP_MAX_SOCKETS=16`,
+`CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y` and `CONFIG_LWIP_SNTP_MAX_SERVERS=2`
+(two NTP servers).
 
 ### Browser flasher
 
@@ -111,8 +146,18 @@ All runtime config lives in NVS, namespace `kidphone` (`src/config_store.c`):
 | `wifi_ssid`, `wifi_pass` | str | Improv Serial (only after the connection works) |
 | `sip_domain`, `sip_user`, `sip_pass` | str | Twilio provisioning |
 | `caller_id` | str | provisioning (the Twilio number, E.164) |
-| `c0_name`/`c0_num` .. `c3_name`/`c3_num` | str | provisioning (contacts; the button and page use contact 0) |
-| `provisioned` | u8 | provisioning (1 = done) |
+| `tw_sid` | str | provisioning (Account SID, not a secret; prefills the page and enables the numbers-only update) |
+| `c0_name`/`c0_num` .. `c3_name`/`c3_num` | str | provisioning or `POST /api/contacts`; slot i = button i, empty number = unused |
+| `c0_sch` .. `c3_sch` | blob, 111 bytes | same; availability schedule, missing = always available |
+| `provisioned` | u8 | provisioning (1 = done; trusted only if the SIP account and at least one number exist) |
+
+Schedule blob (`sched_blob_t` in `config_store.c`, packed, little endian):
+`version` u8 (1), `enabled` u8, `nwin` u8, `tz` char[48] (POSIX TZ rule),
+`tz_name` char[40] (IANA name, display only), then 4 windows of `days` u8
+(bit 0 = Sunday .. bit 6 = Saturday), `start_min` u16, `end_min` u16. A
+window starts on each set day at `start_min`; `end_min <= start_min` runs
+into the next day, equal means 24 hours. A blob with another version or size
+is ignored (contact always available).
 
 The Twilio Auth Token is never stored: it lives in the provisioning task's
 RAM and is zeroed when the task ends. It is never logged, and no endpoint ever
@@ -150,9 +195,10 @@ phone only has the station interface, so it is only reachable on the home LAN.
 | Endpoint | What |
 |---|---|
 | `GET /` | setup page |
-| `GET /api/status` | WiFi, Twilio provisioned/caller ID/contacts, handset, call state and last call result, setup progress |
-| `POST /api/provision` | `{account_sid, auth_token, contact_name, contact_number}` starts provisioning (202) |
-| `POST /api/call` | test call to contact 0, same as the button |
+| `GET /api/status` | WiFi, Twilio (provisioned, caller ID, account SID, SIP user, `login_current`), 4 contact slots with schedule, `available`, `next` {day, time} in their time zone, `time_synced`, handset, call state and contact, last call result (`code`, `kind`, `message`), setup progress |
+| `POST /api/contacts` | `{contacts:[{name, number, schedule:{enabled, tz, tz_name, windows:[{days, start, end}]}} x up to 4]}`; saves names, button order and schedules without a token. If the set of numbers differs from what Twilio allows: 409 `{needs_token: true}` |
+| `POST /api/provision` | `{account_sid, auth_token, contacts, full}` (202). Already set up with its own login, same account, `full` not true: numbers-only update. Otherwise the full setup. `account_sid` may be omitted once stored. Old `contact_name`/`contact_number` still accepted |
+| `POST /api/call` | `{contact: i}` test call, same rules as button i (409 if outside their hours) |
 | `POST /api/hangup` | hang up |
 
 POST bodies must be `application/json` (a cross-site page cannot send that
@@ -166,35 +212,84 @@ anyone on the LAN can rerun setup or place a test call.
 HTTPS with the ESP-IDF certificate bundle, Basic auth SID:token. Only
 `api.twilio.com`, `serverless.twilio.com`, `serverless-upload.twilio.com` are
 contacted. Every step reuses what an earlier run created, so it is safe to
-rerun ("Change number" reruns it, which is why it asks for the token again):
+rerun ("Run setup again" on the page reruns it):
 
 1. `GET Accounts/{SID}.json`: verify credentials, account active (trial noted).
 2. `GET IncomingPhoneNumbers.json`: first number with voice = caller ID, else
    "Buy a phone number in Twilio first".
-3. Credential list `kid-phone`, credential `handset1` with a fresh random
-   32-char password (existing passwords cannot be read back, so it is updated
-   each run).
+3. Credential list `kid-phone`, credential `kidphone-<last 3 bytes of the
+   WiFi STA MAC in hex>` (e.g. `kidphone-a1b2c3`, unique per phone) with a
+   fresh random 32-char password (existing passwords cannot be read back, so
+   it is updated each run). Credentials whose username starts with
+   `handset1` (older firmware) are deleted from that list; other
+   `kidphone-*` credentials are other phones on the same account and kept.
 4. SIP domain with friendly name `kid-phone`, else
    `kidphone-<6 hex>.sip.twilio.com`; credential list mapped under
-   `Auth/Calls/CredentialListMappings` (no registration).
+   `Auth/Calls/CredentialListMappings` (no registration). If another list
+   mapped on the domain (either mapping API) holds the same username, the
+   progress log shows a warning: Twilio may then check the wrong password and
+   answer 403 after a correct-looking login (what happened on 2026-10-10).
 5. Serverless service `kid-phone`, environment `prod`, function `voice`;
    upload `twilio/voice.js` (embedded at build time, one source of truth) as
    `/voice`, protected; build with `APP_PROV_FN_DEPS`; poll until completed
    (2 min timeout); set `CALLER_ID` and `ALLOWED`; deploy.
 6. SIP domain `VoiceUrl = https://<env domain>/voice` (POST).
-7. Save SIP domain/user/password, caller ID, contacts, `provisioned=1`.
+7. Save account SID, SIP domain/user/password, caller ID, contacts with
+   schedules, `provisioned=1`.
+
+Numbers-only update (numbers changed on a phone already set up with its own
+login): 1, find the `kid-phone` service and `prod` environment, set
+`ALLOWED`, redeploy the environment's current `build_sid`, save the
+contacts. If anything is missing it falls back to the full run. **Run setup
+again** on the page always does the full run (fresh password).
+
+### Availability schedules and the clock
+
+`src/schedule.c`. SNTP (`esp_netif_sntp`, servers `pool.ntp.org` and
+`time.google.com`) starts once WiFi is up. A task re-evaluates every contact
+each second and right after any config change; the contact lights and the
+buttons use the result. Not synced yet: every contact is available, logged
+once, and the page shows "Clock not synced".
+
+Time zones: each schedule stores a POSIX TZ rule (`EST5EDT,M3.2.0,M11.1.0`),
+picked on the page from a built-in table of about 80 IANA zones (defaults to
+the browser's own zone). newlib has one process-wide TZ, and its `setenv()`
+leaks the old string whenever the new value is longer, so swapping TZ per
+contact is not used. `src/tz_posix.c` evaluates the rule itself from UTC
+with integer math (names, offsets, `Mm.w.d`, `Jn`, `n`, transition times up
+to 167 h, southern hemisphere rules). It was checked on the host against
+macOS tzdata 2026c for every zone in the table, every 30 minutes over three
+years from 2026-10-10, with no mismatch. Note tzdata 2026c: British Columbia
+and Alberta stay on summer time from November 2026, so the table lists them
+as `MST7` and `CST6`.
+
+A window is evaluated on a circular week of 10080 minutes, so 22:00 to 01:00
+and Saturday into Sunday wrap naturally. "Next available" is the nearest
+window start, shown in the contact's own time.
+
+### Privacy
+
+The phone talks to the parent's own Twilio account (`api.twilio.com`,
+`serverless.twilio.com`, `serverless-upload.twilio.com`, the SIP domain and
+Twilio media servers) and to NTP (`pool.ntp.org`, `time.google.com`) for the
+clock. Nothing else.
 
 Progress shows as plain-language steps on the page; failures show Twilio's
 message plus a hint.
 
-## Button
+## Buttons
 
 | State | Action | Result |
 |---|---|---|
-| idle | short press (release before 1.5 s) | call contact 0 (needs WiFi and Twilio setup) |
-| calling / ringing / in call | press | hang up (CANCEL before answer, BYE after) |
-| idle | hold 1.5 s | cycle test modes: auto -> A -> B -> C -> D -> auto |
-| any | hold 10 s | factory reset: erase the `kidphone` NVS namespace and the WiFi driver's copy, reboot into setup (LED blinks amber from 1.5 s on) |
+| idle | short press button i | call contact i (needs WiFi and Twilio setup) |
+| idle | short press, slot empty or contact outside their hours | busy tone for 2.5 s, no call |
+| calling / ringing / in call | press any button | hang up (CANCEL before answer, BYE after) |
+| idle | hold button 1 (GPIO 4) 1.5 s | cycle test modes: auto -> A -> B -> C -> D -> auto |
+| any | hold button 1 10 s | factory reset: erase the `kidphone` NVS namespace and the WiFi driver's copy, reboot into setup (LED blinks amber from 1.5 s on) |
+
+The onboard RGB light is the phone's status (table above). Each contact light
+is on while that person can be called, off when the slot is empty or they are
+outside their hours, and blinks while they are being called.
 
 What the earpiece plays:
 
@@ -202,8 +297,9 @@ What the earpiece plays:
   tell "offline" from "dead"
 - idle, WiFi up, Twilio not set up: US reorder, 480 + 620 Hz, 250 ms on/off
 - idle, ready: US dial tone (mode C)
-- after a failed call (4xx/5xx/6xx, no response, DNS, not set up): US busy,
-  480 + 620 Hz, 500 ms on/off, for 5 s, then the idle sound again
+- after a failed call (4xx/5xx/6xx, no response, DNS, not set up), or a call
+  Twilio answered and hung up within 5 s: US busy, 480 + 620 Hz, 500 ms
+  on/off, for 5 s, then the idle sound again
 - calling: nothing until the first provisional response
 - ringing: local US ringback (440 + 480 Hz, 2 s on / 4 s off), unless early
   media arrives (a 183 with SDP), in which case the remote audio plays
@@ -287,7 +383,8 @@ Good boot (abridged):
 
 ```
 I main: kid_phone: button places a SIP call
-I config: config: wifi set, twilio provisioned, contact 0 ...1234
+I config: config: wifi set, twilio provisioned
+I config: contact 0: ...1234, schedule off (always available)
 I improv: Improv Serial ready on UART0
 I setup: setup page: http://kidphone.local/ (port 80)
 I wifi: connecting to "..." ...
@@ -302,10 +399,10 @@ I audio: audio mode NOWIFI -> C       (dial tone starts; SETUP instead if Twilio
 A call:
 
 ```
-I main: BUTTON: place call
-I sip: calling ...1234 as handset1@<SIP_DOMAIN>
+I main: BUTTON 0: call Grandma
+I sip: calling ...1234 as kidphone-a1b2c3@<SIP_DOMAIN>
 I sip: SIP server <SIP_DOMAIN> -> 54.x.x.x:5060, local 192.168.x.y:5060
-I sip: CALL STATE IDLE -> CALLING (button)
+I sip: CALL STATE IDLE -> CALLING (contact 0)
 I sip: SIP >> INVITE sip:+1*******1234@<SIP_DOMAIN> SIP/2.0
 I sip: SIP << SIP/2.0 407 Proxy Authentication Required
 I sip: NAT: public address 1.2.3.4, SIP port 61234 (local 192.168.x.y:5060); used in Contact and SDP c=
@@ -322,7 +419,7 @@ I sip: SIP << SIP/2.0 200 OK
 I sip: dialog: remote target sip:..., 1 route(s)
 I sip: CALL STATE RINGING -> IN_CALL (200 OK)
 I rtp: rtp 5s: tx 250 pkts (err 0, audio overflow 0) | rx 250 pkts, lost 0, late 0, dup 0, other 0 | jb depth 3, underruns 0, overflow drops 0
-I main: BUTTON: hang up (state IN_CALL)
+I main: BUTTON 0: hang up (state IN_CALL)
 I sip: CALL STATE IN_CALL -> ENDING (button)
 I sip: SIP >> BYE ...
 I sip: SIP << SIP/2.0 200 OK
@@ -349,17 +446,32 @@ Failure signs:
 
 - `wifi: connect failed (reason N), retrying`: wrong SSID/password or out of
   range; it retries every 2 s forever.
-- `BUTTON: no WiFi yet, cannot call`: pressed before `WIFI UP`.
-- `BUTTON: not set up yet`: Twilio provisioning has not run.
+- `BUTTON n: no WiFi yet, cannot call`: pressed before `WIFI UP`.
+- `BUTTON n: not set up yet`: Twilio provisioning has not run.
+- `BUTTON n: ... outside their available hours`: schedule says no (busy tone).
+- `schedule: clock not synced yet`: NTP not reached; schedules are ignored
+  until it is.
 - `DNS lookup of ... failed`: WiFi up but no DNS/internet.
 - `no response to INVITE (Timer B)`: nothing came back in 32 s (UDP 5060
   blocked, wrong domain).
-- `authentication failed`: credential list mismatch (run setup again, which
-  sets a fresh password), or the SIP Domain does not have the credential
-  list enabled for calls.
-- `call failed: 403/404/480/486/...`: Twilio or the far end refused; the
-  status line says why (a 4xx right after auth usually means the voice URL
-  or TwiML is wrong).
+- `authentication failed` / `403 after digest auth`: the login was rejected
+  (run setup again, which sets a fresh password), or another credential list
+  on the domain holds the same username.
+- `call result: ...`: the same plain-language text the page shows.
+
+What the page says after a failed call (raw SIP status in small text):
+
+| Where it fails | Page message |
+|---|---|
+| 403 to the INVITE that carried Proxy-Authorization, or 401/407 twice | Twilio rejected the phone's login. Run setup again. |
+| 404 | Twilio did not find the phone's setup (SIP domain). Run setup again. |
+| 480 / 486 / 600 / 603 | No answer or busy. |
+| answered, then Twilio's BYE within 5 s | Twilio could not reach this number. Check Geo permissions for that country, and on a trial account only verified numbers can be called. |
+| DNS, no WiFi, no response | The phone could not reach Twilio. Check the WiFi and the internet connection. |
+
+Geo permission and trial-account blocks happen inside the Function's Dial,
+after the SIP leg is answered, which is why they show up as a short call.
+(A grandparent who declines within 5 s would read the same; rare enough.)
 - RTP `rx 0 pkts` while IN_CALL: no media back (NAT/latching problem); check
   `NAT:` and `remote media` lines.
 - Handset failures (`no handset connected`, `no usable format`, `stream start
@@ -387,8 +499,11 @@ Failure signs:
 ## Layout
 
 ```
-src/main.c            app entry, button task (call / hang up / test modes / factory reset), effective audio mode
-src/config_store.c/.h runtime config in NVS (WiFi, SIP account, contacts), secrets.h seeding
+src/main.c            app entry, button task (4 buttons: call / hang up; button 0 test modes / factory reset), effective audio mode
+src/contact_leds.c/.h one light per contact (available / off / blinking while called)
+src/schedule.c/.h     SNTP, per-contact availability evaluation
+src/tz_posix.c/.h     POSIX TZ rule math (no global TZ, host-testable)
+src/config_store.c/.h runtime config in NVS (WiFi, SIP account, contacts and schedules), secrets.h seeding
 src/improv.c/.h       Improv Serial on UART0 (WiFi from the browser flasher)
 src/setup_server.c/.h setup web page + JSON API, mDNS kidphone.local
 src/setup_page.html   the setup page (embedded in flash)
@@ -399,7 +514,7 @@ src/sip.c/.h          minimal SIP UA over UDP: INVITE + digest auth, CANCEL, BYE
 src/rtp.c/.h          PCMU RTP sender/receiver tasks, jitter buffer, stream buffer to the audio task
 src/usb_audio.c/.h    USB host + UAC driver: hot-plug, descriptor log, format choice, volume/mute
 src/audio_engine.c/.h audio task (core 1): mic jitter ring, modes A-D and CALL, stats
-src/app_config.h      all tunables (GPIO, block size, volumes, buffers, SIP/RTP ports and timers)
+src/app_config.h      all tunables (button and LED GPIOs, block size, volumes, buffers, SIP/RTP ports and timers)
 src/secrets.h         optional developer override (gitignored; template secrets.h.example)
 twilio/voice.js       Twilio Function behind the SIP Domain voice URL (allowlist, echo test); embedded and uploaded by provisioning
 web/                  browser flasher page + ESP Web Tools manifest (scripts/build_web_bin.sh builds the image)
