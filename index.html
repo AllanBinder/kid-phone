@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Kid Phone installer</title>
+<meta name="description" content="Install the Kid Phone software on the board from your browser, then connect it to your WiFi.">
+<script type="module" src="https://unpkg.com/esp-web-tools@10.2.1/dist/web/install-button.js"></script>
+<style>
+  :root {
+    --bg: #f7f5f0;
+    --card: #ffffff;
+    --text: #23211d;
+    --muted: #6b665c;
+    --line: #e4dfd4;
+    --accent: #2f6f5e;
+    --accent-text: #ffffff;
+    --note-bg: #eef4f1;
+    --warn-bg: #fbf1e3;
+    --warn-line: #e6c99a;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #171715;
+      --card: #211f1c;
+      --text: #ece8e0;
+      --muted: #a39d91;
+      --line: #36332e;
+      --accent: #6fbfa6;
+      --accent-text: #10221c;
+      --note-bg: #1c2a25;
+      --warn-bg: #2c2418;
+      --warn-line: #5c4a2c;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 17px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  main { max-width: 640px; margin: 0 auto; padding: 40px 16px 64px; }
+  h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 8px; letter-spacing: -0.01em; }
+  h2 { font-size: 1.2rem; margin: 0 0 12px; }
+  h3 { font-size: 1rem; margin: 20px 0 4px; }
+  p { margin: 0 0 12px; }
+  .lede { color: var(--muted); font-size: 1.1rem; margin-bottom: 28px; }
+  section {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 22px 22px 14px;
+    margin-bottom: 20px;
+  }
+  ol, ul { margin: 0 0 12px; padding-left: 1.3em; }
+  li { margin-bottom: 8px; }
+  a { color: var(--accent); }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; }
+  .install { text-align: center; padding: 28px 22px; }
+  .btn {
+    display: inline-block;
+    font: inherit;
+    font-weight: 600;
+    font-size: 1.1rem;
+    padding: 14px 32px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--accent);
+    color: var(--accent-text);
+    cursor: pointer;
+  }
+  .btn:hover { filter: brightness(1.06); }
+  .btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+  .slot-msg {
+    display: block;
+    text-align: left;
+    background: var(--warn-bg);
+    border: 1px solid var(--warn-line);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .small { color: var(--muted); font-size: 0.92rem; margin-top: 14px; margin-bottom: 0; }
+  .privacy { background: var(--note-bg); }
+  footer { color: var(--muted); font-size: 0.85rem; text-align: center; margin-top: 28px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Kid Phone installer</h1>
+  <p class="lede">Puts the Kid Phone software on the board and connects it to your home WiFi, all from this page.</p>
+
+  <section>
+    <h2>Before you start</h2>
+    <ul>
+      <li><strong>The board</strong>, with the telephone handset plugged into the port labelled <strong>USB</strong>.</li>
+      <li><strong>A USB-C cable</strong> from the port labelled <strong>COM</strong> on the board to this computer.</li>
+      <li><strong>A computer with Google Chrome or Microsoft Edge.</strong> Phones, tablets, Safari and Firefox cannot do this step.</li>
+      <li>Your <strong>WiFi name and password</strong>, ready to type in.</li>
+    </ul>
+  </section>
+
+  <section class="install">
+    <esp-web-install-button manifest="manifest.json">
+      <button slot="activate" class="btn">Install Kid Phone</button>
+      <span slot="unsupported" class="slot-msg">
+        This browser cannot talk to the board. Please open this page in
+        <strong>Google Chrome</strong> or <strong>Microsoft Edge</strong> on a
+        computer (Windows, Mac, Linux or a Chromebook). Phones, Safari and
+        Firefox do not support it.
+      </span>
+      <span slot="not-allowed" class="slot-msg">
+        For safety, browsers only allow this from a secure page. Open the
+        installer from its <strong>https://</strong> address (or from
+        <code>localhost</code> if you are running it yourself).
+      </span>
+    </esp-web-install-button>
+    <p class="small">Click the button, choose the board in the list that appears (it may be called USB Single Serial, CH343 or similar), then click Connect.</p>
+  </section>
+
+  <section>
+    <h2>What happens next</h2>
+    <ol>
+      <li><strong>Install.</strong> The page asks whether to erase the board first; say yes for a first install. Copying the software takes a minute or two. Keep the cable plugged in.</li>
+      <li><strong>WiFi.</strong> When it finishes, the page asks for your WiFi name and password and sends them to the board over the cable.</li>
+      <li><strong>Phone setup.</strong> Once the board is online, the page shows a link to the phone's own setup page, usually <a href="http://kidphone.local">http://kidphone.local</a>. Open it on any device on the same WiFi to connect your Twilio account and choose who the phone can call.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>If something goes wrong</h2>
+
+    <h3>The board does not show up in the list</h3>
+    <p>Try a different USB-C cable. Many cables only charge and cannot carry data. Make sure the cable is in the port labelled <strong>COM</strong>, not USB.</p>
+    <p>On Windows you may need the CH343 USB driver from the chip maker, WCH: <a href="https://www.wch-ic.com/downloads/CH343SER_EXE.html" rel="noreferrer">CH343 driver download</a>. Install it, unplug and replug the board, then try again.</p>
+
+    <h3>It gets stuck on "Connecting"</h3>
+    <p>Put the board into install mode by hand: hold the <strong>BOOT</strong> button, tap the <strong>RST</strong> button, then let go of BOOT. Click Install again.</p>
+
+    <h3>After installing, kidphone.local does not open</h3>
+    <p>Check that the device you are using is on the same WiFi as the phone. If the name still does not work, use the number address (it looks like <code>192.168.1.23</code>) that the installer showed once the board joined WiFi. Some Windows and Android devices do not understand <code>.local</code> names, so the number address is the reliable choice.</p>
+  </section>
+
+  <section class="privacy">
+    <h2>Privacy</h2>
+    <p>Installing and WiFi setup happen directly between this browser and the board over the USB cable. Your WiFi password and anything else you type are never uploaded anywhere. This page has no analytics, no tracking and no cookies. The only thing it downloads is the open source installer tool (ESP Web Tools) and the phone software itself.</p>
+  </section>
+
+  <footer>Kid Phone. Installer powered by <a href="https://esphome.github.io/esp-web-tools/" rel="noreferrer">ESP Web Tools</a>.</footer>
+</main>
+</body>
+</html>
