@@ -10,6 +10,7 @@
 #include "config_store.h"
 #include "schedule.h"
 #include "sip.h"
+#include "wifi.h"
 
 static const char *TAG = "leds";
 
@@ -23,6 +24,9 @@ static void leds_task(void *arg)
         const int64_t ms = esp_timer_get_time() / 1000;
         const bool blink_on = (ms / APP_CONTACT_LED_BLINK_MS) % 2 == 0;
         const int calling = sip_call_contact_index();
+        /* No WiFi or not set up: the phone cannot call anyone, so every light
+         * is off (a press then says why). */
+        const bool can_call = wifi_is_connected() && config_is_provisioned();
         for (int i = 0; i < APP_NUM_BUTTONS && i < CFG_MAX_CONTACTS; i++) {
             cfg_contact_t c;
             bool has = config_get_contact(i, &c);
@@ -30,7 +34,7 @@ static void leds_task(void *arg)
             if (i == calling) {
                 on = blink_on;
             } else {
-                on = has && schedule_available(i);
+                on = can_call && has && schedule_available(i);
             }
             gpio_set_level(k_led_gpio[i], on ? 1 : 0);
         }

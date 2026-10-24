@@ -55,7 +55,9 @@ typedef struct {
      *   kind "unreachable" Twilio answered, then hung up within APP_SHORT_CALL_MS
      *   kind "busy"        480 / 486 / 600 / 603
      *   kind "network"     DNS, no WiFi, no response
-     *   kind "setup"       not set up
+     *   kind "setup"       not set up, or no number on that button
+     *   kind "timeup"      the phone hung up at the call length limit
+     *   kind "noanswer"    the phone gave up ringing (APP_SIP_RING_TIMEOUT_MS)
      *   kind "other"       any other failure */
     char kind[12];
     char message[160];
@@ -63,6 +65,6 @@ typedef struct {
 
 void sip_last_result(sip_result_t *out);
 
-/* True for APP_BUSY_TONE_MS after a failed call: main plays the busy tone. */
-bool sip_busy_tone_active(void);
+/* seq of the latest result (cheap to poll; main reacts to a change). */
+uint32_t sip_result_seq(void);
 const char *sip_call_state_name(call_state_t s);

@@ -157,7 +157,7 @@ static void sched_task(void *arg)
                 mask |= 1u << i;
             }
         }
-        config_wipe(cfg); /* it held the SIP and WiFi passwords */
+        config_wipe(cfg); /* it held the SIP password */
         atomic_store(&s_avail_mask, mask);
 
         const bool synced = schedule_time_synced();

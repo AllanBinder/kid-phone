@@ -2,10 +2,10 @@
  * Onboard WS2812 RGB LED (APP_LED_GPIO) as a status light, low brightness:
  *   blue           setup needed (WiFi up, Twilio not set up)
  *   blue pulse     Twilio setup running
- *   green          ready (dial tone)
+ *   green          ready to call
  *   red blinking   no WiFi
  *   white pulse    in a call (calling, ringing, talking)
- *   amber blinking button held long enough for a factory reset warning
+ *   amber blinking BOOT button held long enough for a factory reset warning
  */
 #pragma once
 

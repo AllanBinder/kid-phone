@@ -13,6 +13,7 @@
 #include "app_config.h"
 #include "g711.h"
 #include "modes.h"
+#include "prompts.h"
 #include "resampler.h"
 #include "rtp.h"
 #include "usb_audio.h"
@@ -133,9 +134,19 @@ typedef struct {
     resampler_t dec;       /* mic rate -> 8 kHz */
     resampler_t itp;       /* 8 kHz -> spk rate */
 
+    /* prompt path */
+    bool prompt_ok;        /* spk rate is an integer multiple of PROMPT_RATE */
+    resampler_t pitp;      /* PROMPT_RATE -> spk rate */
+    prompt_id_t pr_id;     /* playing now, PROMPT_NONE if nothing */
+    uint32_t pr_req;       /* request number of pr_id (prompt_poll) */
+    const uint8_t *pr_clip;
+    size_t pr_n, pr_pos;   /* clip length and read position, in samples */
+    bool pr_restart;       /* clear the interpolator before the next block */
+
     /* dial tone oscillators */
     float ph1, ph2;
     uint32_t ring_pos;   /* samples into the ringback cadence */
+    bool fade_in;          /* ramp up the first block of a new tone mode */
 
     bool primed;           /* loopback has enough mic data buffered */
     app_mode_t last_mode;
@@ -156,6 +167,7 @@ static int16_t s_blk_mic[MAX_BLOCK];
 static int16_t s_blk_out[MAX_BLOCK];
 static int16_t s_blk_tel[TEL_BLOCK];
 static uint8_t s_blk_ulaw[TEL_BLOCK];
+static int16_t s_blk_prompt[MAX_BLOCK];
 
 static void reset_paths(void)
 {
@@ -173,6 +185,7 @@ static void reconfigure(const ua_state_t *st)
 {
     resampler_deinit(&E.dec);
     resampler_deinit(&E.itp);
+    resampler_deinit(&E.pitp);
     E.gen = st->generation;
     E.mic = st->mic;
     E.spk = st->spk;
@@ -189,6 +202,12 @@ static void reconfigure(const ua_state_t *st)
             ESP_LOGE(TAG, "resampler init failed (out of memory?)");
         }
     }
+    E.prompt_ok = E.have_spk && E.spk.rate % PROMPT_RATE == 0 &&
+                  resampler_interp_init(&E.pitp, E.spk.rate / PROMPT_RATE, (float)E.spk.rate, APP_PROMPT_CUTOFF_HZ);
+    if (E.have_spk && !E.prompt_ok) {
+        ESP_LOGW(TAG, "earpiece rate %" PRIu32 " Hz: spoken prompts unavailable (tones only)", E.spk.rate);
+    }
+    E.pr_restart = true;
     reset_paths();
 
     if (E.have_mic || E.have_spk) {
@@ -322,9 +341,24 @@ static void cadence_tone(int16_t *out, size_t n, uint32_t rate, float f1, float 
     const float d1 = two_pi * f1 / rate;
     const float d2 = two_pi * f2 / rate;
     const float a = ampl * 32767.0f;
+    /* Each "on" burst ramps up and down over APP_TONE_RAMP_MS: a tone that
+     * starts or stops at full amplitude clicks. */
+    uint32_t r = rate * APP_TONE_RAMP_MS / 1000;
+    if (r * 2 > on) {
+        r = on / 2;
+    }
     for (size_t i = 0; i < n; i++) {
         float v = sinf(E.ph1) + (f2 > 0.0f ? sinf(E.ph2) : 0.0f);
-        out[i] = E.ring_pos < on ? (int16_t)(a * v) : 0;
+        float g = 0.0f;
+        if (E.ring_pos < on) {
+            g = 1.0f;
+            if (r && E.ring_pos < r) {
+                g = (float)E.ring_pos / r;
+            } else if (r && E.ring_pos >= on - r) {
+                g = (float)(on - E.ring_pos) / r;
+            }
+        }
+        out[i] = (int16_t)(a * g * v);
         E.ph1 += d1;
         E.ph2 += d2;
         if (E.ph1 > two_pi) {
@@ -339,14 +373,67 @@ static void cadence_tone(int16_t *out, size_t n, uint32_t rate, float f1, float 
     }
 }
 
-static void produce_block(app_mode_t mode, size_t out_n)
+/* Next block of the playing prompt. Past the end of the clip one more block
+ * of silence flushes the interpolator, then the prompt is reported done. */
+static void prompt_block(int16_t *out, size_t out_n)
 {
-    static app_mode_t prev = MODE_D_SILENCE;
-    if (mode != prev) {
-        E.ring_pos = 0;
+    if (E.pr_id == PROMPT_NONE || !E.prompt_ok) {
+        memset(out, 0, out_n * sizeof(int16_t));
+        return;
     }
-    prev = mode;
+    if (E.pr_restart) {
+        resampler_reset(&E.pitp);
+        E.pr_restart = false;
+    }
+    const size_t in_n = out_n / (size_t)E.pitp.ratio;
+    for (size_t i = 0; i < in_n; i++) {
+        const size_t k = E.pr_pos + i;
+        s_blk_prompt[i] = k < E.pr_n ? (int16_t)(E.pr_clip[2 * k] | (E.pr_clip[2 * k + 1] << 8)) : 0;
+    }
+    E.pr_pos += in_n;
+    resampler_interp_process(&E.pitp, s_blk_prompt, in_n, out);
+    if (E.pr_pos >= E.pr_n + in_n) {
+        prompt_done(E.pr_req);
+        E.pr_id = PROMPT_NONE;
+    }
+}
 
+/* Drop the current prompt without playing the rest (call started, no
+ * earpiece, rate the prompt path cannot do). */
+static void prompt_stop(const char *why)
+{
+    if (E.pr_id != PROMPT_NONE) {
+        ESP_LOGI(TAG, "prompt %s dropped (%s)", prompt_name(E.pr_id), why);
+        E.pr_id = PROMPT_NONE;
+    }
+    prompt_done(E.pr_req);
+}
+
+/* Modes that are a generated tone (they get ramps at start and stop). */
+static bool is_tone_mode(app_mode_t m)
+{
+    return m == MODE_C_DIAL_TONE || m == MODE_RINGBACK || m == MODE_SETUP_NEEDED || m == MODE_BUSY ||
+           m == MODE_NO_WIFI;
+}
+
+/* Linear ramp over the first len samples of b (clamped to n): up from 0 to
+ * full, or down from full to 0 with everything after the ramp zeroed. */
+static void ramp_block(int16_t *b, size_t n, size_t len, bool up)
+{
+    if (len > n) {
+        len = n;
+    }
+    for (size_t i = 0; i < len; i++) {
+        float g = (float)i / (float)len;
+        b[i] = (int16_t)(b[i] * (up ? g : 1.0f - g));
+    }
+    if (!up) {
+        memset(b + len, 0, (n - len) * sizeof(int16_t));
+    }
+}
+
+static void render_block(app_mode_t mode, size_t out_n)
+{
     const size_t mic_n = E.have_mic ? (size_t)E.mic.rate / 1000 * APP_BLOCK_MS : 0;
 
     switch (mode) {
@@ -389,6 +476,9 @@ static void produce_block(app_mode_t mode, size_t out_n)
         cadence_tone(s_blk_out, out_n, E.spk.rate, APP_NOWIFI_BEEP_HZ, 0.0f, APP_STATUS_TONE_AMPL,
                      APP_NOWIFI_ON_MS, APP_NOWIFI_OFF_MS);
         break;
+    case MODE_PROMPT:
+        prompt_block(s_blk_out, out_n);
+        break;
     case MODE_CALL:
         if (E.tel_ok) {
             take_mic(s_blk_mic, mic_n);
@@ -401,6 +491,41 @@ static void produce_block(app_mode_t mode, size_t out_n)
     default:
         memset(s_blk_out, 0, out_n * sizeof(int16_t));
         break;
+    }
+}
+
+/*
+ * One block of the effective mode into s_blk_out. Silence is exact zeros (no
+ * DC, no noise). Switching away from a tone mode first plays one more block
+ * of that tone ramping down to zero (the new mode starts a block, 10 ms,
+ * later); a new tone starts at phase 0 and ramps up. So going between
+ * silence, prompts (which carry their own 5 ms fades, gen_prompts.py) and
+ * the busy tone never jumps in level.
+ */
+static void produce_block(app_mode_t mode, size_t out_n)
+{
+    static app_mode_t prev = MODE_D_SILENCE;
+    const size_t ramp_n = (size_t)E.spk.rate * APP_TONE_RAMP_MS / 1000;
+    if (mode != prev) {
+        const app_mode_t old = prev;
+        prev = mode;
+        if (is_tone_mode(old)) {
+            render_block(old, out_n); /* continues the old tone's phase and cadence */
+            ramp_block(s_blk_out, out_n, ramp_n, false);
+        }
+        E.ring_pos = 0;
+        E.ph1 = E.ph2 = 0.0f;
+        E.fade_in = true;
+        if (is_tone_mode(old)) {
+            return;
+        }
+    }
+    render_block(mode, out_n);
+    if (E.fade_in) {
+        if (is_tone_mode(mode)) {
+            ramp_block(s_blk_out, out_n, ramp_n, true);
+        }
+        E.fade_in = false;
     }
 }
 
@@ -432,6 +557,15 @@ static void audio_task(void *arg)
     E.next_stats_us = esp_timer_get_time() + APP_STATS_PERIOD_MS * 1000LL;
 
     while (1) {
+        /* New prompt request first: prompt_play() makes the prompt active
+         * as it posts the request, so the mode read below already sees it. */
+        prompt_id_t np = prompt_poll(&E.pr_req);
+        if (np != PROMPT_NONE) {
+            E.pr_id = np;
+            E.pr_clip = prompt_clip(np, &E.pr_n);
+            E.pr_pos = 0;
+            E.pr_restart = true;
+        }
         app_mode_t mode = app_mode_get();
         bool wrote = false;
 
@@ -444,6 +578,12 @@ static void audio_task(void *arg)
                 ESP_LOGI(TAG, "audio mode %s -> %s", app_mode_short(E.last_mode), app_mode_short(mode));
                 reset_paths();
                 E.last_mode = mode;
+            }
+
+            if (prompt_active() && mode != MODE_PROMPT) {
+                prompt_stop("call");
+            } else if (prompt_active() && (!E.have_spk || !E.prompt_ok)) {
+                prompt_stop(E.have_spk ? "earpiece rate" : "no earpiece");
             }
 
             if (E.have_mic) {

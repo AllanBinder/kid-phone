@@ -75,6 +75,38 @@ ol { padding-left: 20px; margin: 8px 0; }
 .times input { width: 120px; padding: 6px 8px; }
 .times button { margin: 0 0 0 auto; }
 .calls { display: flex; flex-wrap: wrap; }
+details > summary { font-size: 18px; font-weight: 600; cursor: pointer; }
+details[open] > summary { margin: 0 0 8px; }
+button.danger { background: var(--warn); border-color: var(--warn); color: var(--card); }
+.net { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0;
+  border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.net:last-child { border-bottom: 0; }
+.net .nm { font-weight: 600; overflow-wrap: anywhere; }
+.net .meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.net button.mini { margin: 0; }
+.bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 14px; vertical-align: middle; }
+.bars i { display: block; width: 4px; background: var(--line); border-radius: 1px; }
+.bars i.on { background: var(--ok); }
+.bars i:nth-child(1) { height: 25%; } .bars i:nth-child(2) { height: 50%; }
+.bars i:nth-child(3) { height: 75%; } .bars i:nth-child(4) { height: 100%; }
+#scan-list { margin: 8px 0 0; }
+#scan-list .pick { display: flex; width: 100%; justify-content: space-between; align-items: center; gap: 10px;
+  margin: 6px 0 0; padding: 8px 12px; background: var(--bg); color: var(--ink); border: 1px solid var(--line);
+  font-weight: 500; text-align: left; }
+#scan-list .pick.sel { border-color: var(--accent); outline: 1px solid var(--accent); }
+.pw { display: flex; gap: 8px; align-items: center; }
+.pw button { margin: 0; white-space: nowrap; }
+.net .last { flex-basis: 100%; font-size: 14px; color: var(--muted); margin: -2px 0 0; }
+.net .last.bad { color: var(--warn); font-weight: 600; }
+.net .fix { flex-basis: 100%; font-size: 14px; background: var(--warn-bg); color: var(--warn); border-radius: 8px;
+  padding: 6px 10px; margin: 0; }
+a.jump { color: var(--accent); font-size: 14px; font-weight: 600; white-space: nowrap; margin-left: 8px; }
+#attempts { margin: 14px 0 0; }
+#attempts > summary { font-size: 15px; }
+#attempts ul { list-style: none; padding: 0; margin: 0; }
+#attempts li { padding: 4px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+#attempts li:last-child { border-bottom: 0; }
+#attempts li .bad { font-weight: 600; }
 footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 24px; }
 </style>
 </head>
@@ -85,12 +117,14 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
 
   <section class="card">
     <h2>Status</h2>
-    <div class="row"><span>WiFi</span><span id="s-wifi">...</span></div>
+    <div class="row"><span>WiFi</span><span><span id="s-wifi">...</span><a class="jump" href="#c-wifi" id="l-wifi">WiFi settings</a></span></div>
     <div class="row"><span>Phone service</span><span id="s-tw">...</span></div>
     <div class="row"><span>Handset</span><span id="s-hs">...</span></div>
     <div class="row"><span>Clock</span><span id="s-clock">...</span></div>
     <div class="row"><span>Calls come from</span><span id="s-from">...</span></div>
+    <div class="row hidden" id="r-key"><span>Changing numbers</span><span id="s-key">...</span></div>
     <div class="note hidden" id="old-login">This phone still uses the shared login from older software. Press <b>Run setup again</b> below to give it its own.</div>
+    <div class="note hidden" id="old-program">Your Twilio account still has the call program from older phone software. Press <b>Run setup again</b> below to update it (the phone then tells your child when nobody answers).</div>
   </section>
 
   <section class="card">
@@ -99,6 +133,19 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     <form id="family" autocomplete="off"></form>
     <button type="button" id="b-save" class="hidden">Save</button>
     <p class="hint" id="save-msg"></p>
+    <div class="alert hidden" id="save-err">
+      <b id="save-err-t"></b><span id="save-err-h"></span>
+      <div><button type="button" class="secondary mini" id="b-save-retry">Try again</button><button type="button" class="secondary mini" id="b-save-token">Use the Auth Token instead</button></div>
+    </div>
+  </section>
+
+  <section class="card" id="c-calls">
+    <h2>Call length</h2>
+    <label for="maxmin">Longest call, in minutes</label>
+    <input id="maxmin" type="number" inputmode="numeric" min="1" max="120" step="1" style="max-width: 140px">
+    <p class="hint">When a call reaches this length the phone hangs up and says "Time's up". The child can press the button again to call back.</p>
+    <button type="button" id="b-maxmin">Save</button>
+    <p class="hint" id="maxmin-msg"></p>
   </section>
 
   <section class="card hidden" id="c-tw">
@@ -116,7 +163,7 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     <input id="sid" placeholder="AC..." spellcheck="false" autocapitalize="off">
     <label for="token">Auth Token</label>
     <input id="token" type="password" spellcheck="false" autocapitalize="off">
-    <p class="hint">Used once, then forgotten. The phone never stores it. Changing names or available times later does not need it; adding or changing a phone number does, because Twilio keeps the list of numbers the phone may call.</p>
+    <p class="hint">Used once, then forgotten: the phone never stores it. Instead the phone keeps a limited Twilio key that can only update the list of numbers it may call, so changing names, times or phone numbers later does not need the token.</p>
     <button type="button" id="b-connect">Connect</button>
     <button type="button" class="secondary hidden" id="b-tw-cancel">Cancel</button>
   </section>
@@ -137,8 +184,49 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     <div class="alert hidden" id="call-err"><b id="call-err-t"></b><span class="small" id="call-err-code"></span></div>
   </section>
 
+  <section class="card" id="c-wifi">
+    <h2>WiFi networks</h2>
+    <p>The phone remembers up to <span id="w-max">5</span> WiFi networks and joins the strongest one it can see. Taking the phone to another home? Add that home's WiFi here first, while the phone is still on this one.</p>
+    <div id="wifi-list"></div>
+    <p class="hint" id="wifi-list-msg"></p>
+    <details id="attempts" class="hidden">
+      <summary>Recent connection attempts</summary>
+      <ul id="attempt-list"></ul>
+      <p class="hint">Since the phone last started. Signal is what the phone saw just before the attempt.</p>
+    </details>
+    <h3 style="margin-top: 16px">Add a network</h3>
+    <button type="button" class="secondary" id="b-scan">Scan for networks</button>
+    <div id="scan-list"></div>
+    <p class="hint" id="scan-msg"></p>
+    <label for="w-ssid">Network name</label>
+    <input id="w-ssid" autocomplete="off" spellcheck="false" autocapitalize="off">
+    <p class="hint">Pick one from the scan, or type the name (for a hidden network). The phone uses 2.4 GHz WiFi only.</p>
+    <label for="w-pass">Password</label>
+    <div class="pw">
+      <input id="w-pass" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="off">
+      <button type="button" class="secondary mini" id="b-wshow">Show</button>
+    </div>
+    <p class="hint" id="w-pass-hint">8 to 63 characters. Leave it empty for an open network.</p>
+    <button type="button" id="b-wadd">Add</button>
+    <p class="hint">Adding does not move the phone off the network it is on now. It uses the new one the next time it connects.</p>
+    <p class="hint" id="wifi-msg"></p>
+  </section>
+
+  <section class="card">
+    <details id="adv">
+      <summary>Advanced</summary>
+      <h3>Factory reset</h3>
+      <p>Erases everything on the phone: the WiFi, the Twilio connection, the people on each button, their times and the call length. Nothing in your Twilio account is deleted.</p>
+      <p>Afterwards the phone is off every saved WiFi network, so this page stops working. Set it up again from the start: plug its COM port into a computer and open the installer page.</p>
+      <label for="reset-word">Type RESET to confirm</label>
+      <input id="reset-word" autocomplete="off" spellcheck="false" autocapitalize="characters" style="max-width: 200px">
+      <button type="button" class="danger" id="b-reset" disabled>Factory reset</button>
+      <p class="hint" id="reset-msg"></p>
+    </details>
+  </section>
+
   <footer>
-    Hold the phone's first button for 10 seconds to erase all settings.<br>
+    You can also erase all settings by holding the BOOT button on the phone's board for 10 seconds.<br>
     <span id="fw"></span>
   </footer>
 </main>
@@ -252,7 +340,15 @@ const el = (tag, props, ...kids) => {
 };
 let st = null, formSig = null, dirty = false, watchSeq = null, pollTimer = null;
 let twMode = null; /* null | "setup" | "numbers" | "full" */
-let pendingContacts = null;
+let pendingContacts = null; /* contacts waiting for the Auth Token ("numbers" mode) */
+/* A setup run started by Save or Connect: {run, contacts, before, via}.
+ * run = setup run id, contacts = what was sent, before = the phone's saved
+ * contacts at that moment, via = "key" (phone's own limited key), "token"
+ * (numbers update with the Auth Token) or "setup" (full run). While set, the
+ * form is never reloaded over the edits. */
+let pendingRun = null;
+let mmDirty = false; /* call length edited, not saved yet */
+let resetting = false; /* factory reset sent: stop polling, the phone is going away */
 
 function browserZone() {
   let z = "";
@@ -350,7 +446,7 @@ function contactBlock(i, c) {
 
   const panel = el("div", {className: "sched"});
   panel.append(el("p", {className: "hint", textContent:
-    "Ask them when they are happy to take calls. Outside these times the light stays off and the button plays a busy tone instead of calling."}));
+    "Ask them when they are happy to take calls. Outside these times the light stays off and the phone says they can't talk right now instead of calling."}));
   const zsel = zoneSelect(sched);
   zsel.className = "f-zone";
   panel.append(el("label", {textContent: "Their time zone"}), zsel);
@@ -426,8 +522,96 @@ function readForm() {
   return {contacts: out};
 }
 
-$("family").addEventListener("input", () => { dirty = true; $("save-msg").textContent = ""; });
+$("family").addEventListener("input", () => { dirty = true; if (!pendingRun) saveNote(""); });
 $("family").addEventListener("change", () => { dirty = true; });
+
+/* ---------- save outcome ---------- */
+
+function saveNote(text, cls) {
+  setText("save-msg", text, "hint" + (cls ? " " + cls : ""));
+}
+
+function showSaveErr(title, hint) {
+  show("save-err", !!title);
+  $("save-err-t").textContent = title || "";
+  $("save-err-h").textContent = hint ? " " + hint : "";
+}
+
+/* What the phone stores for a typed number (setup_server.c normalize_number). */
+function normNum(n) {
+  n = (n || "").trim();
+  if (!n) return "";
+  if (n.startsWith("00")) n = "+" + n.slice(2);
+  return n.replace(/[ \-.()\/]/g, "");
+}
+const tail = (n) => "..." + n.slice(-4);
+const savedContacts = () => (st.twilio.contacts || []).map((c) => ({name: c.name || "", number: c.number || ""}));
+
+/* The run ended "done": check that the phone really stores what was sent,
+ * then say per button what it calls now. */
+function saveSucceeded(pr) {
+  const now = savedContacts();
+  const bad = pr.contacts.findIndex((c, i) => normNum(c.number) !== ((now[i] || {}).number || ""));
+  if (bad >= 0) {
+    saveFailed(pr, {error: "Button " + (bad + 1) + " was not saved: the phone still has " +
+      (now[bad] && now[bad].number ? tail(now[bad].number) : "no number") + ".",
+      hint: "Press Try again. If it keeps happening, restart the phone."});
+    return;
+  }
+  const lines = [];
+  now.forEach((c, i) => {
+    const b = pr.before[i] || {number: ""};
+    if (c.number && c.number !== b.number) lines.push("Button " + (i + 1) + " (" + c.name + ") now calls " + tail(c.number) + ".");
+    else if (!c.number && b.number) lines.push("Button " + (i + 1) + " is now unused.");
+  });
+  saveNote(lines.length ? "Saved. " + lines.join(" ") : "Saved.", "good");
+  showSaveErr(null);
+  pendingContacts = null;
+  /* Reload the form from the phone unless it was edited again meanwhile. */
+  const f = readForm();
+  if (!f.error && JSON.stringify(f.contacts) === JSON.stringify(pr.contacts)) loadForm();
+}
+
+/* Any other outcome: keep the edits, say why, offer a retry. */
+function saveFailed(pr, s) {
+  dirty = true;
+  if (pr.via === "setup") {
+    /* Connect / Run setup: the Setting up card below has the error and hint. */
+    saveNote("Setup did not finish, so nothing above was saved. See Setting up below.", "bad");
+    return;
+  }
+  saveNote("Not saved. The buttons still call the old numbers.", "bad");
+  showSaveErr(s.error || "The update did not finish.", s.hint || "");
+  $("b-save-retry").dataset.via = pr.via;
+  $("b-save-token").textContent = pr.via === "token" ? "Enter the Auth Token again" : "Use the Auth Token instead";
+}
+
+function askToken(contacts, why) {
+  pendingContacts = contacts;
+  saveNote("Not saved yet. Enter your Auth Token in the box below to finish.", "bad");
+  openTwilio("numbers", why);
+  $("c-tw").scrollIntoView({behavior: "smooth", block: "start"});
+}
+
+/* Follow the run started by Save or Connect until it ends. */
+function trackSave(s, running) {
+  const pr = pendingRun;
+  if (!pr) return;
+  if (s.run < pr.run || (s.run === pr.run && running)) return; /* older answer, or still going */
+  pendingRun = null;
+  if (s.run > pr.run) {
+    saveFailed(pr, {error: "Another setup run started before this one was confirmed.", hint: "Check the numbers below and press Save again."});
+  } else if (s.state === "done") {
+    saveSucceeded(pr);
+  } else if (pr.via === "key" && s.needs_token) {
+    /* Twilio no longer accepts the key: send the same contacts with the token. */
+    showSaveErr(null);
+    dirty = true;
+    askToken(pr.contacts, s.error + " " + (s.hint || ""));
+  } else {
+    saveFailed(pr, s);
+  }
+}
 
 /* ---------- status rendering ---------- */
 
@@ -443,15 +627,26 @@ function availText(c) {
 function render() {
   const w = st.wifi, t = st.twilio, cs = t.contacts || [];
   setText("s-wifi", w.connected ? "Connected to " + w.ssid + (w.ip ? " (" + w.ip + ")" : "") : "Not connected", w.connected ? "good" : "bad");
+  renderWifi(w);
   setText("s-tw", t.provisioned ? "Ready" : "Not set up yet", t.provisioned ? "good" : "bad");
   setText("s-hs", st.handset ? "Plugged in" : "Not detected (plug it into the USB port marked OTG)", st.handset ? "good" : "bad");
   setText("s-clock", st.time_synced ? "Synced" : "Clock not synced (calls are allowed at any time until it is)", st.time_synced ? "good" : "bad");
   setText("s-from", t.caller_id || "Not set up yet");
+  show("r-key", t.provisioned);
+  setText("s-key", t.numbers_key ? "Just press Save (no Auth Token needed)" :
+    "Needs your Auth Token each time (press Run setup again once to fix)", t.numbers_key ? "good" : "bad");
   show("old-login", t.provisioned && !t.login_current);
+  show("old-program", t.provisioned && t.login_current && t.program_current === false);
   $("fw").textContent = "Firmware " + st.firmware;
+  const set = st.settings || {};
+  const mm = $("maxmin");
+  if (set.max_call_minutes && document.activeElement !== mm && !mmDirty) mm.value = set.max_call_minutes;
+  if (set.max_call_minutes_lo) { mm.min = set.max_call_minutes_lo; mm.max = set.max_call_minutes_hi; }
 
   const s = st.setup, running = s.state === "running";
-  if (formSig === null || (!dirty && !running && !twMode && savedSig() !== formSig)) loadForm();
+  if (formSig !== null) trackSave(s, running);
+  /* Never reload the form over edits that are unsaved or still on their way. */
+  if (formSig === null || (!dirty && !pendingRun && !pendingContacts && !running && !twMode && savedSig() !== formSig)) loadForm();
   cs.forEach((c, i) => {
     const chip = $("chip-" + i);
     if (!chip) return;
@@ -463,7 +658,7 @@ function render() {
   show("c-progress", s.state !== "idle");
   $("log").replaceChildren(...s.steps.map((line, i) => {
     const li = el("li", {textContent: line});
-    if (line.startsWith("Warning:")) li.className = "warn";
+    if (line.startsWith("Warning:") || line.startsWith("Failed:")) li.className = "warn";
     else if (running && i === s.steps.length - 1) li.className = "cur";
     return li;
   }));
@@ -503,6 +698,12 @@ function checkCallResult() {
   const r = st.call.last;
   if (r.seq === watchSeq || st.call.state !== "IDLE") return;
   watchSeq = null;
+  if (r.kind === "timeup") {
+    /* Not a problem: the phone hung up at the call length limit. */
+    show("call-err", false);
+    $("call-state").textContent = r.message;
+    return;
+  }
   show("call-err", !!r.message);
   if (r.message) {
     $("call-err-t").textContent = r.message;
@@ -513,16 +714,216 @@ function checkCallResult() {
   }
 }
 
+/* ---------- WiFi networks ---------- */
+
+const utf8len = (s) => new TextEncoder().encode(s).length;
+const barsLevel = (rssi) => rssi >= -55 ? 4 : rssi >= -65 ? 3 : rssi >= -75 ? 2 : 1;
+function barsEl(n, rssi) {
+  const b = el("span", {className: "bars", title: rssi + " dBm"});
+  for (let i = 1; i <= 4; i++) b.append(el("i", {className: i <= n ? "on" : ""}));
+  return b;
+}
+let wifiSig = null;
+let scanSecured = null; /* secured flag of the network picked from the scan, null = typed */
+
+/* "just now", "5 min ago", "2 h ago" from seconds. */
+function agoText(s) {
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + " min ago";
+  if (s < 86400) return Math.floor(s / 3600) + " h ago";
+  return Math.floor(s / 86400) + " d ago";
+}
+const minuteOf = (s) => s === undefined ? null : Math.floor(s / 60);
+
+/* One plain line under a saved network: the last try if it failed, else
+ * where the last scan saw it. */
+function lastLine(n) {
+  if (n.connected) return null;
+  if (n.last_result && n.last_result !== "connected") {
+    return {bad: true, text: "Last try: " + n.last_text + " (" + agoText(n.last_try_ago_s) + ")" +
+      (n.in_last_scan && n.last_rssi !== undefined ? ". Last seen " + n.last_rssi + " dBm" : "")};
+  }
+  if (n.in_last_scan && n.last_rssi !== undefined) return {bad: false, text: "Last seen " + n.last_rssi + " dBm (" + agoText(n.last_seen_ago_s) + ")"};
+  if (n.in_last_scan === false) return {bad: false, text: "Not seen in the last scan" +
+    (n.last_rssi !== undefined ? " (seen " + n.last_rssi + " dBm " + agoText(n.last_seen_ago_s) + ")" : "")};
+  if (n.last_result === "connected") return {bad: false, text: "Last try: connected (" + agoText(n.last_try_ago_s) + ")"};
+  return null;
+}
+
+function renderAttempts(list) {
+  show("attempts", list.length > 0);
+  $("attempt-list").replaceChildren(...list.map((a) => {
+    const ok = a.result === "connected";
+    const li = el("li", {},
+      el("b", {textContent: a.ssid || "(no name)"}), " ",
+      el("span", {className: ok ? "good" : a.result === "dropped" ? "" : "bad", textContent: a.text}),
+      el("span", {className: "small", textContent:
+        (a.rssi !== undefined ? ", seen " + a.rssi + " dBm" : ", not in the scan") +
+        (a.improv ? ", from the installer" : "") + ", " + agoText(a.ago_s)}));
+    return li;
+  }));
+}
+
+function renderWifi(w) {
+  const saved = w.saved || [];
+  const attempts = w.attempts || [];
+  $("w-max").textContent = w.max || 5;
+  /* Ages count up every poll: compare them by the minute so the list is not
+   * rebuilt every 3 s. */
+  const sig = JSON.stringify([
+    saved.map((n) => Object.assign({}, n, {last_seen_ago_s: minuteOf(n.last_seen_ago_s), last_try_ago_s: minuteOf(n.last_try_ago_s)})),
+    attempts.map((a) => [a.at_s, a.ssid, a.result, a.rssi, minuteOf(a.ago_s)]),
+    w.connected, w.ssid, w.connected ? barsLevel(w.rssi) : 0]);
+  if (sig === wifiSig) return;
+  wifiSig = sig;
+  const list = $("wifi-list");
+  if (!saved.length) {
+    list.replaceChildren(el("p", {className: "hint", textContent: "No network saved."}));
+    renderAttempts(attempts);
+    return;
+  }
+  list.replaceChildren(...saved.map((n) => {
+    const meta = el("span", {className: "meta"});
+    if (n.connected) {
+      meta.append(el("span", {className: "chip on", textContent: "Connected"}), barsEl(barsLevel(w.rssi), w.rssi),
+        el("span", {className: "small", textContent: w.rssi + " dBm"}));
+    } else if (!w.connected && w.ssid === n.ssid && w.state === "connecting") {
+      meta.append(el("span", {className: "chip", textContent: "Connecting..."}));
+    }
+    if (!n.secured) meta.append(el("span", {className: "chip", textContent: "Open"}));
+    const rm = el("button", {type: "button", className: "secondary mini", textContent: "Remove"});
+    rm.addEventListener("click", () => removeWifi(n.ssid, saved.length));
+    meta.append(rm);
+    const row = el("div", {className: "net"}, el("span", {className: "nm", textContent: n.ssid}), meta);
+    const ll = lastLine(n);
+    if (ll) row.append(el("p", {className: "last" + (ll.bad ? " bad" : ""), textContent: ll.text}));
+    if (!n.connected && n.last_result === "wrong_password") {
+      row.append(el("p", {className: "fix", textContent: "The router did not accept the saved password. Press Remove, then add \"" +
+        n.ssid + "\" again below with the right password (it is case sensitive)."}));
+    }
+    return row;
+  }));
+  renderAttempts(attempts);
+}
+
+async function removeWifi(ssid, count) {
+  const msg = $("wifi-list-msg");
+  msg.textContent = "";
+  if (count <= 1) {
+    msg.textContent = "This is the only saved network. Without it the phone could not get back on WiFi and this page would be unreachable. Add another network first, or use Factory reset to start over.";
+    return;
+  }
+  let r = await api("/api/wifi/remove", {ssid});
+  if (!r.ok && r.j.needs_confirm) {
+    if (!confirm("Remove \"" + ssid + "\"?\n\n" + r.j.error)) return;
+    r = await api("/api/wifi/remove", {ssid, confirm: true});
+    if (r.ok) {
+      msg.textContent = "Removed. The phone is switching to another saved network. If this page stops updating, open http://kidphone.local/ from a computer on that network.";
+      wifiSig = null;
+      kick();
+      return;
+    }
+  }
+  msg.textContent = r.ok ? "Removed." : (r.j.error || "Could not remove it. Try again.");
+  wifiSig = null;
+  kick();
+}
+
+function pickNetwork(n, btn) {
+  $("w-ssid").value = n.ssid;
+  scanSecured = n.secured;
+  document.querySelectorAll("#scan-list .pick").forEach((b) => b.classList.toggle("sel", b === btn));
+  $("w-pass").value = "";
+  $("w-pass-hint").textContent = n.secured ? "8 to 63 characters." : "Open network: leave the password empty.";
+  $("wifi-msg").textContent = n.saved ? "This network is already saved. Adding it again changes its password." : "";
+  $("w-pass").focus();
+}
+
+$("b-scan").addEventListener("click", async () => {
+  const b = $("b-scan");
+  b.disabled = true;
+  b.textContent = "Scanning...";
+  $("scan-msg").textContent = "";
+  let r;
+  try { r = await api("/api/wifi/scan", {}); } catch (e) { r = {ok: false, j: {}}; }
+  b.disabled = false;
+  b.textContent = "Scan again";
+  if (!r.ok) { $("scan-msg").textContent = r.j.error || "Could not scan. Try again."; return; }
+  const nets = r.j.networks || [];
+  $("scan-msg").textContent = nets.length ? "Tap a network to pick it." : "No networks found. You can still type a name below.";
+  $("scan-list").replaceChildren(...nets.map((n) => {
+    const right = el("span", {className: "meta"});
+    if (n.connected) right.append(el("span", {className: "chip on", textContent: "Connected"}));
+    else if (n.saved) right.append(el("span", {className: "chip", textContent: "Saved"}));
+    right.append(el("span", {className: "small", textContent: n.secured ? "Secured" : "Open"}), barsEl(n.bars, n.rssi));
+    const btn = el("button", {type: "button", className: "pick"}, el("span", {className: "nm", textContent: n.ssid}), right);
+    btn.addEventListener("click", () => pickNetwork(n, btn));
+    return btn;
+  }));
+});
+
+$("w-ssid").addEventListener("input", () => {
+  scanSecured = null;
+  document.querySelectorAll("#scan-list .pick").forEach((b) => b.classList.remove("sel"));
+  $("w-pass-hint").textContent = "8 to 63 characters. Leave it empty for an open network.";
+  $("wifi-msg").textContent = "";
+});
+$("b-wshow").addEventListener("click", () => {
+  const p = $("w-pass"), hide = p.type === "text";
+  p.type = hide ? "password" : "text";
+  $("b-wshow").textContent = hide ? "Show" : "Hide";
+});
+
+$("b-wadd").addEventListener("click", async () => {
+  const ssid = $("w-ssid").value, password = $("w-pass").value, msg = $("wifi-msg");
+  const sl = utf8len(ssid);
+  if (!ssid.trim()) { msg.textContent = "Type the network name, or pick one from the scan."; return; }
+  if (sl > 32) { msg.textContent = "That network name is too long (32 bytes at most)."; return; }
+  if (password && (password.length < 8 || password.length > 63)) {
+    msg.textContent = "A WiFi password has 8 to 63 characters. Leave it empty for an open network."; return;
+  }
+  if (!password && scanSecured === true) { msg.textContent = "This network needs its password."; return; }
+  const saved = (st && st.wifi.saved) || [];
+  const exists = saved.some((n) => n.ssid === ssid);
+  if (!exists && saved.length >= (st.wifi.max || 5)) {
+    msg.textContent = "The phone keeps " + (st.wifi.max || 5) + " networks at most. Remove one first."; return;
+  }
+  $("b-wadd").disabled = true;
+  let r;
+  try { r = await api("/api/wifi/add", {ssid, password}); } catch (e) { r = {ok: false, j: {}}; }
+  $("b-wadd").disabled = false;
+  if (!r.ok) { msg.textContent = r.j.error || "Could not save. Try again."; return; }
+  $("w-pass").value = "";
+  $("w-ssid").value = "";
+  scanSecured = null;
+  document.querySelectorAll("#scan-list .pick").forEach((b) => b.classList.remove("sel"));
+  const on = st && st.wifi.connected ? st.wifi.ssid : "";
+  msg.textContent = r.j.updated ? "Password updated for \"" + ssid + "\"." :
+    "Saved \"" + ssid + "\"." + (on && on !== ssid ? " The phone stays on \"" + on + "\" for now and uses the new one the next time it connects." : "");
+  wifiSig = null;
+  kick();
+});
+
 async function poll() {
   try {
     const r = await api("/api/status");
     if (r.ok) { st = r.j; render(); }
   } catch (e) {}
+  if (resetting) return;
   const busy = st && (st.setup.state === "running" || st.call.state !== "IDLE" || watchSeq !== null);
   pollTimer = setTimeout(poll, busy ? 1000 : 3000);
 }
 
 function kick() { clearTimeout(pollTimer); poll(); }
+
+/* Status card link: jump to the WiFi card (and open any collapsed part). */
+$("l-wifi").addEventListener("click", (ev) => {
+  ev.preventDefault();
+  const card = $("c-wifi");
+  if (card.tagName === "DETAILS") card.open = true;
+  card.scrollIntoView({behavior: "smooth", block: "start"});
+  history.replaceState(null, "", "#c-wifi");
+});
 
 /* ---------- actions ---------- */
 
@@ -536,49 +937,124 @@ function openTwilio(mode, why) {
 
 $("b-save").addEventListener("click", async () => {
   const f = readForm();
-  if (f.error) { $("save-msg").textContent = f.error; return; }
+  if (f.error) { saveNote(f.error, "bad"); return; }
+  showSaveErr(null);
   $("b-save").disabled = true;
-  const r = await api("/api/contacts", {contacts: f.contacts});
+  const before = savedContacts();
+  let r;
+  try { r = await api("/api/contacts", {contacts: f.contacts}); } catch (e) { r = {ok: false, j: {error: "The phone did not answer. Check that it is on, then press Save again."}}; }
   $("b-save").disabled = false;
-  if (r.ok) {
-    $("save-msg").textContent = "Saved.";
-    dirty = false;
+  if (r.ok && r.j.updating) {
+    /* Numbers changed: the phone updates Twilio with its own limited key.
+     * The edits stay dirty until the run is confirmed. */
+    pendingRun = {run: r.j.run, contacts: f.contacts, before, via: "key"};
+    saveNote((r.j.message || "Telling Twilio about the new numbers...") + " Wait for \"Saved\" here before you try the buttons.");
+    kick();
+  } else if (r.ok) {
+    /* Saved on the phone right away (no Twilio change). Confirm from a
+     * status read made after the save, not from an older poll. */
+    let s2 = null;
+    try { s2 = await api("/api/status"); } catch (e) {}
+    if (s2 && s2.ok) {
+      st = s2.j;
+      saveSucceeded({run: null, contacts: f.contacts, before, via: "direct"});
+    } else {
+      saveNote("Saved.", "good");
+      dirty = false;
+    }
     kick();
   } else if (r.j.needs_token) {
-    pendingContacts = f.contacts;
-    $("save-msg").textContent = "";
-    openTwilio("numbers", r.j.error);
+    askToken(f.contacts, r.j.error);
   } else {
-    $("save-msg").textContent = r.j.error || "Could not save. Try again.";
+    saveNote("Not saved: " + (r.j.error || "Try again."), "bad");
   }
+});
+
+$("b-save-retry").addEventListener("click", () => {
+  if ($("b-save-retry").dataset.via !== "token") { $("b-save").click(); return; }
+  const f = readForm();
+  if (f.error) { saveNote(f.error, "bad"); return; }
+  showSaveErr(null);
+  askToken(f.contacts, "Try again with your Auth Token.");
+});
+$("b-save-token").addEventListener("click", () => {
+  const f = readForm();
+  if (f.error) { saveNote(f.error, "bad"); return; }
+  showSaveErr(null);
+  askToken(f.contacts, "Enter your Auth Token to tell Twilio about the numbers above.");
 });
 
 $("b-connect").addEventListener("click", async () => {
   const mode = !st.twilio.provisioned ? "setup" : twMode;
   let contacts = pendingContacts;
-  if (mode !== "numbers") {
+  if (mode !== "numbers" || !contacts) {
     const f = readForm();
     if (f.error) { alert(f.error); return; }
     contacts = f.contacts;
   }
   const body = {account_sid: $("sid").value.trim(), auth_token: $("token").value.trim(), contacts, full: mode !== "numbers"};
   $("b-connect").disabled = true;
-  const r = await api("/api/provision", body);
+  const before = savedContacts();
+  let r;
+  try { r = await api("/api/provision", body); } catch (e) { r = {ok: false, j: {}}; }
   $("token").value = "";
   if (!r.ok) {
     alert(r.j.error || "Something went wrong. Try again.");
     $("b-connect").disabled = false;
     return;
   }
+  /* Older firmware answers without a run id: then only the progress card reports. */
+  pendingRun = typeof r.j.run === "number" ? {run: r.j.run, contacts, before, via: mode === "numbers" ? "token" : "setup"} : null;
+  if (mode === "numbers") saveNote("Telling Twilio about the new numbers... Wait for \"Saved\" here before you try the buttons.");
+  showSaveErr(null);
   twMode = null;
   pendingContacts = null;
-  dirty = false;
   kick();
 });
 
-$("b-tw-cancel").addEventListener("click", () => { twMode = null; pendingContacts = null; render(); });
+$("maxmin").addEventListener("input", () => { mmDirty = true; $("maxmin-msg").textContent = ""; });
+$("b-maxmin").addEventListener("click", async () => {
+  const v = Number($("maxmin").value);
+  const lo = Number($("maxmin").min), hi = Number($("maxmin").max);
+  if (!Number.isInteger(v) || v < lo || v > hi) {
+    $("maxmin-msg").textContent = "Pick a whole number of minutes from " + lo + " to " + hi + ".";
+    return;
+  }
+  $("b-maxmin").disabled = true;
+  const r = await api("/api/settings", {max_call_minutes: v});
+  $("b-maxmin").disabled = false;
+  $("maxmin-msg").textContent = r.ok ? "Saved." : (r.j.error || "Could not save. Try again.");
+  if (r.ok) { mmDirty = false; kick(); }
+});
+
+$("b-tw-cancel").addEventListener("click", () => {
+  /* The edits stay in the form, unsaved. */
+  if (pendingContacts) saveNote("Not saved. Press Save when you are ready.", "bad");
+  twMode = null; pendingContacts = null; render();
+});
 $("b-rerun").addEventListener("click", () => openTwilio("full",
   "Setup runs again with the people above. It gives the phone a fresh login, which fixes most call problems."));
+
+$("reset-word").addEventListener("input", () => {
+  $("b-reset").disabled = $("reset-word").value.trim() !== "RESET";
+  $("reset-msg").textContent = "";
+});
+$("b-reset").addEventListener("click", async () => {
+  const word = $("reset-word").value.trim();
+  if (word !== "RESET") return;
+  $("b-reset").disabled = true;
+  let r;
+  try { r = await api("/api/factory_reset", {confirm: word}); } catch (e) { r = {ok: false, j: {}}; }
+  if (!r.ok) {
+    $("b-reset").disabled = false;
+    $("reset-msg").textContent = r.j.error || "Could not reset. Try again.";
+    return;
+  }
+  resetting = true;
+  clearTimeout(pollTimer);
+  $("reset-word").disabled = true;
+  $("reset-msg").textContent = "Erasing. The phone restarts in a few seconds and is then ready to be set up again from the installer page.";
+});
 
 async function testCall(i) {
   show("call-err", false);

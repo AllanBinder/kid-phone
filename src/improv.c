@@ -27,6 +27,7 @@
 
 #include "app_config.h"
 #include "config_store.h"
+#include "sip.h"
 #include "wifi.h"
 
 static const char *TAG = "improv";
@@ -116,39 +117,43 @@ static void cmd_wifi(const uint8_t *p, uint8_t len)
         }
         memcpy(pass, p + 2 + sl, pl);
     }
+    if (!ssid[0]) {
+        send_error(E_INVALID);
+        return;
+    }
     ESP_LOGI(TAG, "WiFi settings received for \"%s\"", ssid);
     send_state(S_PROVISIONING);
 
-    /* Remember the old credentials so a typo does not lock the phone out. */
-    app_cfg_t old;
-    config_get(&old);
-    wifi_apply_credentials(ssid, pass);
-    int waited = 0;
-    while (!wifi_is_connected() && waited < APP_IMPROV_CONNECT_MS) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-        waited += 100;
-    }
-    if (wifi_is_connected()) {
-        config_set_wifi(ssid, pass);
-        ESP_LOGI(TAG, "WiFi connected, credentials saved");
-        send_state(S_PROVISIONED);
-        send_redirect(C_WIFI);
+    /* The network is only saved once it works, so a typo cannot lock the
+     * phone out: on failure the phone goes back to its saved networks. It is
+     * added to the list (same SSID = new password), never replacing the
+     * others; with the list full the oldest saved network makes room. */
+    if (wifi_try_network(ssid, pass, APP_IMPROV_CONNECT_MS)) {
+        bool updated = false;
+        esp_err_t err = config_wifi_add(ssid, pass, "", &updated);
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "WiFi connected, network %s", updated ? "password updated" : "saved");
+            send_state(S_PROVISIONED);
+            send_redirect(C_WIFI);
+        } else {
+            ESP_LOGE(TAG, "WiFi connected but saving failed: %s", esp_err_to_name(err));
+            send_error(E_UNKNOWN);
+            send_state(S_READY);
+        }
+        wifi_networks_changed();
     } else {
         ESP_LOGW(TAG, "could not connect to \"%s\"", ssid);
         send_error(E_NO_CONNECT);
         send_state(S_READY);
-        if (old.wifi_ssid[0]) {
-            wifi_apply_credentials(old.wifi_ssid, old.wifi_pass);
-        }
     }
-    config_wipe(&old);
     mbedtls_platform_zeroize(pass, sizeof(pass));
 }
 
 static void cmd_scan(void)
 {
     static wifi_ap_record_t recs[20];
-    int n = wifi_scan(recs, 20);
+    /* No scan during a call: it would pause the audio. Answer an empty list. */
+    int n = sip_call_state() == CALL_IDLE ? wifi_scan(recs, 20) : 0;
     for (int i = 0; i < n; i++) {
         if (!recs[i].ssid[0]) {
             continue;

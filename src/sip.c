@@ -432,6 +432,11 @@ static bool auth_param(const char *v, const char *key, char *out, size_t out_len
  * State
  * ------------------------------------------------------------------------- */
 
+/* Calls the phone ends on its own timers (anything else: END_NORMAL).
+ * END_NETWORK: the WiFi went away or the phone moved to another network
+ * (new local IP), so the call's addresses are dead. */
+typedef enum { END_NORMAL = 0, END_TIME_LIMIT, END_RING_TIMEOUT, END_NETWORK } end_kind_t;
+
 /* CMD_START + n = call contact n (0..CFG_MAX_CONTACTS-1). */
 typedef enum { CMD_HANGUP = 0, CMD_START = 1 } cmd_t;
 
@@ -491,10 +496,16 @@ typedef struct {
     uint32_t nit_interval;
 
     /* outcome, recorded by end_call() */
+    end_kind_t end_kind;      /* the phone itself ended it on a limit */
     bool failed;              /* never connected: error final, Timer B */
     int fail_code;            /* SIP status of the failing final, 0 if none */
     bool remote_bye;
     int64_t answer_ms;        /* 0 until answered */
+    int64_t max_call_ms;      /* hang up this long after the answer */
+
+    /* network watch */
+    int64_t net_check_ms;     /* next check */
+    int64_t net_down_ms;      /* WiFi down since, 0 = up */
 } call_t;
 
 static call_t C;
@@ -507,10 +518,10 @@ static char s_pub_ip[16];     /* NAT public address learned from Via received= *
 static uint16_t s_pub_port;   /* and rport= */
 static char s_rx[RX_BUF_BYTES + 1];
 
-/* Result of the last call, read by main (busy tone) and the setup page. */
+/* Result of the last call, read by main (prompt, busy tone) and the setup page. */
 static portMUX_TYPE s_res_mux = portMUX_INITIALIZER_UNLOCKED;
 static sip_result_t s_result;
-static _Atomic int64_t s_busy_until_ms;
+static _Atomic uint32_t s_result_seq;
 
 static _Atomic int s_contact = -1;
 
@@ -520,15 +531,27 @@ static _Atomic int s_contact = -1;
  * 2026-10-10 when two credential lists held the same username). Geo
  * permission and trial-account blocks happen behind the Function, which has
  * already answered the SIP leg, so they show up as a very short call. */
-static void classify(sip_result_t *r, bool auth_sent)
+static void classify(sip_result_t *r, bool auth_sent, end_kind_t end)
 {
     const char *kind = "", *msg = "";
-    if (r->failed) {
+    if (end == END_TIME_LIMIT) {
+        kind = "timeup";
+        msg = "The call reached the time limit, so the phone hung up.";
+    } else if (end == END_RING_TIMEOUT && !r->answered) {
+        kind = "noanswer";
+        msg = "Nobody answered.";
+    } else if (end == END_NETWORK) {
+        kind = "network";
+        msg = "The WiFi connection dropped, so the call ended. Check the WiFi and the internet connection.";
+    } else if (r->failed) {
         switch (r->code) {
         case 0:
             if (strstr(r->reason, "not set up")) {
                 kind = "setup";
                 msg = "The phone is not connected to Twilio yet. Finish setup first.";
+            } else if (strstr(r->reason, "no number")) {
+                kind = "setup";
+                msg = "Nobody is set up on this button.";
             } else {
                 kind = "network";
                 msg = "The phone could not reach Twilio. Check the WiFi and the internet connection.";
@@ -574,7 +597,7 @@ static void classify(sip_result_t *r, bool auth_sent)
 }
 
 static void record_result(bool failed, int code, bool answered, bool remote, uint32_t talk_ms, const char *why,
-                          bool auth_sent)
+                          bool auth_sent, end_kind_t end)
 {
     sip_result_t r = {0};
     r.failed = failed;
@@ -584,7 +607,7 @@ static void record_result(bool failed, int code, bool answered, bool remote, uin
     r.talk_ms = talk_ms;
     r.contact = atomic_load(&s_contact);
     strlcpy(r.reason, why, sizeof(r.reason));
-    classify(&r, auth_sent);
+    classify(&r, auth_sent, end);
     if (r.message[0]) {
         ESP_LOGW(TAG, "call result: %s (%s%s%d)", r.message, why, code ? ", SIP " : ", code ", code);
     }
@@ -592,9 +615,7 @@ static void record_result(bool failed, int code, bool answered, bool remote, uin
     r.seq = s_result.seq + 1;
     s_result = r;
     portEXIT_CRITICAL(&s_res_mux);
-    if (failed || strcmp(r.kind, "unreachable") == 0) {
-        atomic_store(&s_busy_until_ms, now_ms() + APP_BUSY_TONE_MS);
-    }
+    atomic_store(&s_result_seq, r.seq);
 }
 
 int sip_call_contact_index(void)
@@ -609,9 +630,9 @@ void sip_last_result(sip_result_t *out)
     portEXIT_CRITICAL(&s_res_mux);
 }
 
-bool sip_busy_tone_active(void)
+uint32_t sip_result_seq(void)
 {
-    return now_ms() < atomic_load(&s_busy_until_ms);
+    return atomic_load(&s_result_seq);
 }
 
 const char *sip_call_state_name(call_state_t s)
@@ -993,7 +1014,7 @@ static void end_call(const char *why)
 {
     int64_t now = now_ms();
     record_result(C.failed, C.fail_code, C.answer_ms != 0, C.remote_bye,
-                  C.answer_ms ? (uint32_t)(now - C.answer_ms) : 0, why, C.auth_tries > 0);
+                  C.answer_ms ? (uint32_t)(now - C.answer_ms) : 0, why, C.auth_tries > 0, C.end_kind);
     rtp_session_end();
     C.active = false;
     C.nit_active = false;
@@ -1005,7 +1026,7 @@ static void end_call(const char *why)
 static void start_failed(const char *why)
 {
     ESP_LOGW(TAG, "%s", why);
-    record_result(true, 0, false, false, 0, why, false);
+    record_result(true, 0, false, false, 0, why, false, END_NORMAL);
 }
 
 static void start_call(int contact)
@@ -1017,6 +1038,7 @@ static void start_call(int contact)
     strlcpy(s_pass, cfg.sip_pass, sizeof(s_pass));
     strlcpy(s_dest, cfg.contacts[contact].number, sizeof(s_dest));
     bool ready = cfg.provisioned;
+    const unsigned max_min = cfg.max_call_min;
     config_wipe(&cfg);
     atomic_store(&s_contact, contact);
 
@@ -1064,6 +1086,7 @@ static void start_call(int contact)
     C.cseq = 1 + esp_random() % 1000;
     C.active = true;
     C.call_start_ms = now_ms();
+    C.max_call_ms = (int64_t)max_min * 60000;
 
     /* Until a response tells us otherwise, assume no NAT. */
     strcpy(s_pub_ip, s_local_ip);
@@ -1400,6 +1423,39 @@ static void on_request(const msg_t *m, const struct sockaddr_in *from)
     }
 }
 
+/* The call's Via, Contact and SDP carry s_local_ip (and the NAT address
+ * learned on that network). After a WiFi loss longer than
+ * APP_SIP_NET_LOSS_MS, or on a different local IP (the phone joined another
+ * saved network), nothing can reach the call any more: end it locally so
+ * the phone is free for the next press, which picks up the new address. */
+static bool check_network(int64_t now, call_state_t st)
+{
+    if (st == CALL_ENDING || st == CALL_IDLE || now < C.net_check_ms) {
+        return false;
+    }
+    C.net_check_ms = now + 500;
+    char ip[16];
+    const char *why = NULL;
+    if (wifi_get_ip(ip, sizeof(ip))) {
+        C.net_down_ms = 0;
+        if (strcmp(ip, s_local_ip) != 0) {
+            ESP_LOGW(TAG, "local IP changed (%s -> %s) during the call", s_local_ip, ip);
+            why = "network changed during the call";
+        }
+    } else if (!C.net_down_ms) {
+        C.net_down_ms = now;
+    } else if (now - C.net_down_ms >= APP_SIP_NET_LOSS_MS) {
+        why = "WiFi lost during the call";
+    }
+    if (!why) {
+        return false;
+    }
+    C.end_kind = END_NETWORK;
+    C.failed = C.answer_ms == 0;
+    end_call(why);
+    return true;
+}
+
 static void run_timers(void)
 {
     if (!C.active) {
@@ -1407,6 +1463,10 @@ static void run_timers(void)
     }
     const int64_t now = now_ms();
     const call_state_t st = sip_call_state();
+
+    if (check_network(now, st)) {
+        return;
+    }
 
     /* INVITE: Timer A retransmits until any response, Timer B gives up. */
     if (!C.inv_provisional && C.inv_final == 0) {
@@ -1423,7 +1483,16 @@ static void run_timers(void)
     }
 
     if ((st == CALL_CALLING || st == CALL_RINGING) && now - C.call_start_ms >= APP_SIP_RING_TIMEOUT_MS) {
+        C.end_kind = END_RING_TIMEOUT;
         hangup("no answer, ring timeout");
+        return;
+    }
+
+    /* Call length limit: a clean BYE, then main says "Time's up". */
+    if (st == CALL_IN_CALL && C.answer_ms && now - C.answer_ms >= C.max_call_ms) {
+        ESP_LOGI(TAG, "call reached the %" PRId64 " min limit, hanging up", C.max_call_ms / 60000);
+        C.end_kind = END_TIME_LIMIT;
+        hangup("call time limit");
         return;
     }
 

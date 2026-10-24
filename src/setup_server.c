@@ -7,11 +7,14 @@
 #include "esp_app_desc.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "mbedtls/platform_util.h"
 #include "mdns.h"
 
 #include "app_config.h"
 #include "config_store.h"
+#include "modes.h"
 #include "schedule.h"
 #include "sip.h"
 #include "twilio_provision.h"
@@ -161,23 +164,90 @@ static cJSON *contact_json(const cfg_contact_t *ct)
     return ci;
 }
 
+/* WiFi state plus the saved networks (SSIDs only, never a password). */
+static void wifi_json(cJSON *w)
+{
+    char ssid[33], ip[16] = "";
+    int rssi = 0;
+    bool up = wifi_current(ssid, sizeof(ssid), &rssi);
+    cJSON_AddBoolToObject(w, "connected", up);
+    cJSON_AddStringToObject(w, "state", wifi_state_name());
+    cJSON_AddStringToObject(w, "ssid", ssid);
+    if (up) {
+        cJSON_AddNumberToObject(w, "rssi", rssi);
+    }
+    if (wifi_get_ip(ip, sizeof(ip))) {
+        cJSON_AddStringToObject(w, "ip", ip);
+    }
+    cfg_wifi_info_t nets[CFG_MAX_WIFI];
+    int n = config_wifi_list(nets, CFG_MAX_WIFI);
+    cJSON_AddNumberToObject(w, "max", CFG_MAX_WIFI);
+    const uint32_t now = wifi_uptime_s();
+    cJSON_AddNumberToObject(w, "uptime_s", now);
+    cJSON *arr = cJSON_AddArrayToObject(w, "saved");
+    for (int i = 0; i < n; i++) {
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddStringToObject(e, "ssid", nets[i].ssid);
+        cJSON_AddBoolToObject(e, "secured", nets[i].secured);
+        cJSON_AddBoolToObject(e, "connected", up && strcmp(nets[i].ssid, ssid) == 0);
+        wifi_net_info_t ni;
+        bool scanned = false;
+        wifi_net_info(nets[i].ssid, &ni, &scanned);
+        if (scanned) {
+            cJSON_AddBoolToObject(e, "in_last_scan", ni.in_scan);
+        }
+        if (ni.ever_seen) {
+            cJSON_AddNumberToObject(e, "last_rssi", ni.rssi);
+            cJSON_AddNumberToObject(e, "last_seen_ago_s", now - ni.seen_s);
+        }
+        if (ni.tried) {
+            char txt[64];
+            wifi_result_text(ni.result, ni.reason, txt, sizeof(txt));
+            cJSON_AddStringToObject(e, "last_result", wifi_result_key(ni.result));
+            cJSON_AddStringToObject(e, "last_text", txt);
+            cJSON_AddNumberToObject(e, "last_reason", ni.reason);
+            cJSON_AddNumberToObject(e, "last_try_ago_s", now - ni.try_s);
+        }
+        cJSON_AddItemToArray(arr, e);
+    }
+    wifi_attempt_t att[8];
+    int na = wifi_attempts(att, 8);
+    cJSON *aa = cJSON_AddArrayToObject(w, "attempts");
+    for (int i = 0; i < na; i++) {
+        char txt[64];
+        wifi_result_text(att[i].result, att[i].reason, txt, sizeof(txt));
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddStringToObject(e, "ssid", att[i].ssid);
+        if (att[i].seen) {
+            cJSON_AddNumberToObject(e, "rssi", att[i].rssi);
+        }
+        cJSON_AddStringToObject(e, "result", wifi_result_key(att[i].result));
+        cJSON_AddStringToObject(e, "text", txt);
+        cJSON_AddNumberToObject(e, "reason", att[i].reason);
+        cJSON_AddNumberToObject(e, "at_s", att[i].at_s);
+        cJSON_AddNumberToObject(e, "ago_s", now - att[i].at_s);
+        if (att[i].improv) {
+            cJSON_AddBoolToObject(e, "improv", true);
+        }
+        cJSON_AddItemToArray(aa, e);
+    }
+}
+
 static esp_err_t h_status(httpd_req_t *req)
 {
     if (!host_ok(req)) {
         return send_msg(req, "403 Forbidden", false, "bad host");
     }
+    /* Setup state before the contacts: a run saves the contacts before it
+     * reports done, so "done" here always comes with the new contacts. */
+    cJSON *setup = cJSON_CreateObject();
+    twilio_provision_status_json(setup);
     app_cfg_t c;
     config_get(&c);
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "firmware", esp_app_get_description()->version);
 
-    cJSON *w = cJSON_AddObjectToObject(o, "wifi");
-    char ip[16] = "";
-    cJSON_AddBoolToObject(w, "connected", wifi_is_connected());
-    cJSON_AddStringToObject(w, "ssid", c.wifi_ssid);
-    if (wifi_get_ip(ip, sizeof(ip))) {
-        cJSON_AddStringToObject(w, "ip", ip);
-    }
+    wifi_json(cJSON_AddObjectToObject(o, "wifi"));
 
     /* Numbers are the parent's own data on their own network; secrets never. */
     cJSON *t = cJSON_AddObjectToObject(o, "twilio");
@@ -191,10 +261,20 @@ static esp_err_t h_status(httpd_req_t *req)
     /* Set up by older firmware (shared "handset1" login): a full setup run
      * moves it to its own login. */
     cJSON_AddBoolToObject(t, "login_current", strcmp(c.sip_user, want_user) == 0);
+    /* Set up before the current call program (twilio/voice.js and its voice
+     * clip): only a full setup run installs the new one. */
+    cJSON_AddBoolToObject(t, "program_current", c.call_program >= APP_TW_PROGRAM_VERSION);
+    /* Only whether the restricted numbers key exists; never the key itself. */
+    cJSON_AddBoolToObject(t, "numbers_key",
+                          c.key_sid[0] && c.key_secret[0] && c.svc_sid[0] && c.env_sid[0]);
     cJSON *contacts = cJSON_AddArrayToObject(t, "contacts");
     for (int i = 0; i < CFG_MAX_CONTACTS; i++) {
         cJSON_AddItemToArray(contacts, contact_json(&c.contacts[i]));
     }
+    cJSON *set = cJSON_AddObjectToObject(o, "settings");
+    cJSON_AddNumberToObject(set, "max_call_minutes", c.max_call_min);
+    cJSON_AddNumberToObject(set, "max_call_minutes_lo", APP_CALL_MAX_MIN_LO);
+    cJSON_AddNumberToObject(set, "max_call_minutes_hi", APP_CALL_MAX_MIN_HI);
     config_wipe(&c);
     cJSON_AddBoolToObject(o, "time_synced", schedule_time_synced());
 
@@ -217,7 +297,7 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddStringToObject(last, "message", r.message);
     cJSON_AddNumberToObject(call, "contact", sip_call_contact_index());
 
-    twilio_provision_status_json(cJSON_AddObjectToObject(o, "setup"));
+    cJSON_AddItemToObject(o, "setup", setup);
     return send_json(req, "200 OK", o);
 }
 
@@ -387,6 +467,7 @@ static cJSON *read_json(httpd_req_t *req)
  * If the phone is already set up with its own login on the same account and
  * full is not true, only the numbers are pushed to Twilio (quick path);
  * otherwise the full setup runs. account_sid may be left out once stored.
+ * Answers 202 {ok, message, run}: progress is in /api/status setup.
  */
 static esp_err_t h_provision(httpd_req_t *req)
 {
@@ -466,15 +547,21 @@ static esp_err_t h_provision(httpd_req_t *req)
         return send_msg(req, "409 Conflict", false, "Setup could not start (already running?).");
     }
     ESP_LOGI(TAG, "%s started from the web page", quick ? "number update" : "setup");
-    return send_msg(req, "202 Accepted", true, "Setup started.");
+    /* The run id lets the page tell this run's outcome from older ones. */
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddBoolToObject(o, "ok", true);
+    cJSON_AddStringToObject(o, "message", "Setup started.");
+    cJSON_AddNumberToObject(o, "run", twilio_provision_run_id());
+    return send_json(req, "202 Accepted", o);
 }
 
 /*
  * POST /api/contacts {contacts: [...]}: names and schedules, no Twilio token.
- * Numbers may move between buttons, but the set of numbers must stay the
- * same, because the Twilio Function only dials numbers on its ALLOWED list.
- * A changed set answers 409 with needs_token, and the page then sends the
- * same contacts to /api/provision together with the Auth Token.
+ * Numbers may move between buttons freely. A changed set of numbers has to
+ * reach the Twilio Function's ALLOWED list: with the stored restricted key
+ * the update starts right away (202 {updating: true, run}, progress in
+ * /api/status setup); without a key it answers 409 with needs_token, and the
+ * page then sends the same contacts to /api/provision with the Auth Token.
  */
 static esp_err_t h_contacts(httpd_req_t *req)
 {
@@ -500,6 +587,21 @@ static esp_err_t h_contacts(httpd_req_t *req)
     bool provisioned = c.provisioned;
     bool same = same_numbers(ct, c.contacts);
     config_wipe(&c);
+    if (provisioned && !same && config_has_twilio_key()) {
+        if (!wifi_is_connected()) {
+            return send_msg(req, "409 Conflict", false, "The phone is not on WiFi.");
+        }
+        if (!twilio_provision_start_with_key(ct)) {
+            return send_msg(req, "409 Conflict", false, "The update could not start. Try again.");
+        }
+        ESP_LOGI(TAG, "number update with the stored key started from the web page");
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddBoolToObject(o, "ok", true);
+        cJSON_AddBoolToObject(o, "updating", true);
+        cJSON_AddNumberToObject(o, "run", twilio_provision_run_id());
+        cJSON_AddStringToObject(o, "message", "Telling Twilio about the new numbers...");
+        return send_json(req, "202 Accepted", o);
+    }
     if (!provisioned || !same) {
         cJSON *o = cJSON_CreateObject();
         cJSON_AddBoolToObject(o, "ok", false);
@@ -514,6 +616,32 @@ static esp_err_t h_contacts(httpd_req_t *req)
         return send_msg(req, "500 Internal Server Error", false, "Could not save. Try again.");
     }
     ESP_LOGI(TAG, "contacts and schedules saved from the web page");
+    return send_msg(req, "200 OK", true, "Saved.");
+}
+
+/* POST /api/settings {max_call_minutes}: phone-only settings, no Twilio. */
+static esp_err_t h_settings(httpd_req_t *req)
+{
+    if (!post_ok(req)) {
+        return ESP_OK;
+    }
+    cJSON *j = read_json(req);
+    if (!j) {
+        return send_msg(req, "400 Bad Request", false, "Missing, too large or bad request.");
+    }
+    const cJSON *v = cJSON_GetObjectItem(j, "max_call_minutes");
+    bool num = cJSON_IsNumber(v);
+    double m = num ? v->valuedouble : 0;
+    cJSON_Delete(j);
+    if (!num || m != (double)(int)m || m < APP_CALL_MAX_MIN_LO || m > APP_CALL_MAX_MIN_HI) {
+        char e[80];
+        snprintf(e, sizeof(e), "Pick a call length from %d to %d minutes.", APP_CALL_MAX_MIN_LO, APP_CALL_MAX_MIN_HI);
+        return send_msg(req, "400 Bad Request", false, e);
+    }
+    if (config_set_max_call_minutes((unsigned)m) != ESP_OK) {
+        return send_msg(req, "500 Internal Server Error", false, "Could not save. Try again.");
+    }
+    ESP_LOGI(TAG, "max call length set to %d min from the web page", (int)m);
     return send_msg(req, "200 OK", true, "Saved.");
 }
 
@@ -549,7 +677,7 @@ static esp_err_t h_call(httpd_req_t *req)
     schedule_eval(&ct.sched, &st);
     if (!st.available) {
         return send_msg(req, "409 Conflict", false,
-                        "They are outside their available hours, so the phone would play a busy tone.");
+                        "They are outside their available hours, so the phone would say they can't talk right now.");
     }
     ESP_LOGI(TAG, "test call to contact %d from the web page", idx);
     sip_call_contact(idx);
@@ -563,6 +691,226 @@ static esp_err_t h_hangup(httpd_req_t *req)
     }
     sip_call_hangup();
     return send_msg(req, "200 OK", true, NULL);
+}
+
+/* ---------------------------------------------------------------------------
+ * WiFi networks
+ * ------------------------------------------------------------------------- */
+
+/* GET /api/wifi: what the phone is on, its signal, and the saved list. */
+static esp_err_t h_wifi(httpd_req_t *req)
+{
+    if (!host_ok(req)) {
+        return send_msg(req, "403 Forbidden", false, "bad host");
+    }
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddBoolToObject(o, "ok", true);
+    wifi_json(o);
+    return send_json(req, "200 OK", o);
+}
+
+/* 1 to 4 bars from the signal. */
+static int signal_bars(int rssi)
+{
+    return rssi >= -55 ? 4 : rssi >= -65 ? 3 : rssi >= -75 ? 2 : 1;
+}
+
+/*
+ * POST /api/wifi/scan {}: nearby networks, one entry per SSID (its
+ * strongest access point), strongest first, hidden ones left out. The radio
+ * is 2.4 GHz only. Refused during a call: the scan hops channels and would
+ * pause the audio. The connection itself stays up.
+ */
+static esp_err_t h_wifi_scan(httpd_req_t *req)
+{
+    if (!post_ok(req)) {
+        return ESP_OK;
+    }
+    if (sip_call_state() != CALL_IDLE) {
+        return send_msg(req, "409 Conflict", false, "The phone is in a call. Scan again when the call has ended.");
+    }
+    static wifi_ap_record_t recs[24]; /* the server runs one handler at a time */
+    int n = wifi_scan(recs, 24);
+    if (n < 0) {
+        return send_msg(req, "503 Service Unavailable", false, "The phone could not scan right now. Try again.");
+    }
+    char cur[33];
+    bool up = wifi_current(cur, sizeof(cur), NULL);
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddBoolToObject(o, "ok", true);
+    cJSON *arr = cJSON_AddArrayToObject(o, "networks");
+    for (int i = 0; i < n; i++) {
+        const char *ss = (const char *)recs[i].ssid;
+        if (!ss[0]) {
+            continue;
+        }
+        bool dup = false;
+        for (int j = 0; j < i && !dup; j++) {
+            dup = strcmp((const char *)recs[j].ssid, ss) == 0;
+        }
+        if (dup) {
+            continue; /* sorted strongest first: keep the first */
+        }
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddStringToObject(e, "ssid", ss);
+        cJSON_AddNumberToObject(e, "rssi", recs[i].rssi);
+        cJSON_AddNumberToObject(e, "bars", signal_bars(recs[i].rssi));
+        cJSON_AddBoolToObject(e, "secured", recs[i].authmode != WIFI_AUTH_OPEN);
+        cJSON_AddBoolToObject(e, "saved", config_wifi_has(ss));
+        cJSON_AddBoolToObject(e, "connected", up && strcmp(ss, cur) == 0);
+        cJSON_AddItemToArray(arr, e);
+    }
+    return send_json(req, "200 OK", o);
+}
+
+/*
+ * POST /api/wifi/add {ssid, password}: save a network (same SSID = new
+ * password). Does not touch the current connection: the phone uses it the
+ * next time it (re)connects, or right away if it is offline.
+ */
+static esp_err_t h_wifi_add(httpd_req_t *req)
+{
+    if (!post_ok(req)) {
+        return ESP_OK;
+    }
+    cJSON *j = read_json(req);
+    if (!j) {
+        return send_msg(req, "400 Bad Request", false, "Missing, too large or bad request.");
+    }
+    char ssid[64], pass[80];
+    strlcpy(ssid, json_str(j, "ssid"), sizeof(ssid)); /* not trimmed: spaces can be part of a name */
+    strlcpy(pass, json_str(j, "password"), sizeof(pass));
+    const size_t sl = strlen(json_str(j, "ssid")), pl = strlen(json_str(j, "password"));
+    cJSON *pw = cJSON_GetObjectItem(j, "password");
+    if (cJSON_IsString(pw)) {
+        mbedtls_platform_zeroize(pw->valuestring, strlen(pw->valuestring));
+    }
+    cJSON_Delete(j);
+
+    const char *err = NULL;
+    if (sl < 1 || sl > 32) {
+        err = sl ? "That network name is too long (32 bytes at most)." : "Type the network name.";
+    } else if (pl != 0 && (pl < 8 || pl > 63)) {
+        err = "A WiFi password has 8 to 63 characters. Leave it empty for an open network.";
+    }
+    bool updated = false;
+    esp_err_t e = ESP_FAIL;
+    if (!err) {
+        e = config_wifi_add(ssid, pass, NULL, &updated);
+    }
+    mbedtls_platform_zeroize(pass, sizeof(pass));
+    if (err) {
+        return send_msg(req, "400 Bad Request", false, err);
+    }
+    if (e == ESP_ERR_NO_MEM) {
+        char m[120];
+        snprintf(m, sizeof(m), "The phone keeps %d networks at most. Remove one first.", CFG_MAX_WIFI);
+        return send_msg(req, "409 Conflict", false, m);
+    }
+    if (e != ESP_OK) {
+        return send_msg(req, "500 Internal Server Error", false, "Could not save. Try again.");
+    }
+    ESP_LOGI(TAG, "WiFi network %s from the web page", updated ? "password changed" : "added");
+    wifi_history_new_password(ssid);
+    wifi_networks_changed();
+    cJSON *o = cJSON_CreateObject();
+    cJSON_AddBoolToObject(o, "ok", true);
+    cJSON_AddBoolToObject(o, "updated", updated);
+    cJSON_AddStringToObject(o, "message", updated ? "Password updated." : "Saved.");
+    return send_json(req, "200 OK", o);
+}
+
+/*
+ * POST /api/wifi/remove {ssid, confirm}: forget a network. Removing the one
+ * the phone is on needs confirm: true (409 needs_confirm otherwise); the
+ * phone then leaves it and joins the strongest other saved network. The
+ * last saved network is never removed.
+ */
+static esp_err_t h_wifi_remove(httpd_req_t *req)
+{
+    if (!post_ok(req)) {
+        return ESP_OK;
+    }
+    cJSON *j = read_json(req);
+    if (!j) {
+        return send_msg(req, "400 Bad Request", false, "Missing, too large or bad request.");
+    }
+    char ssid[33];
+    strlcpy(ssid, json_str(j, "ssid"), sizeof(ssid));
+    const bool confirm = cJSON_IsTrue(cJSON_GetObjectItem(j, "confirm"));
+    cJSON_Delete(j);
+    if (!ssid[0] || !config_wifi_has(ssid)) {
+        return send_msg(req, "404 Not Found", false, "That network is not saved on the phone.");
+    }
+    if (config_wifi_count() <= 1) {
+        return send_msg(req, "409 Conflict", false,
+                        "This is the only saved network. Without it the phone could not get back on WiFi and "
+                        "this page would be unreachable. Add another network first, or use Factory reset to "
+                        "start over.");
+    }
+    char cur[33];
+    if (wifi_current(cur, sizeof(cur), NULL) && strcmp(cur, ssid) == 0 && !confirm) {
+        cJSON *o = cJSON_CreateObject();
+        cJSON_AddBoolToObject(o, "ok", false);
+        cJSON_AddBoolToObject(o, "needs_confirm", true);
+        cJSON_AddStringToObject(o, "error",
+                                "The phone is on this network right now. Removing it disconnects the phone, which "
+                                "then joins the strongest other saved network. This page stops working unless "
+                                "your computer can reach the phone there.");
+        return send_json(req, "409 Conflict", o);
+    }
+    esp_err_t e = config_wifi_remove(ssid);
+    if (e == ESP_ERR_INVALID_STATE) {
+        return send_msg(req, "409 Conflict", false, "This is the only saved network.");
+    }
+    if (e != ESP_OK) {
+        return send_msg(req, "500 Internal Server Error", false, "Could not remove it. Try again.");
+    }
+    ESP_LOGI(TAG, "WiFi network removed from the web page");
+    esp_err_t r = send_msg(req, "200 OK", true, "Removed.");
+    wifi_networks_changed(); /* after the reply: leaving the current network waits a moment more */
+    return r;
+}
+
+/* Runs the reset after the reply has had time to leave the socket. */
+static void factory_reset_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(500));
+    app_factory_reset("setup page");
+}
+
+/*
+ * POST /api/factory_reset {confirm: "RESET"}: erase everything (WiFi,
+ * Twilio, numbers key, contacts, call length) and reboot into setup. The
+ * confirmation word is checked here too, not only on the page.
+ */
+static esp_err_t h_factory_reset(httpd_req_t *req)
+{
+    if (!post_ok(req)) {
+        return ESP_OK;
+    }
+    cJSON *j = read_json(req);
+    if (!j) {
+        return send_msg(req, "400 Bad Request", false, "Missing, too large or bad request.");
+    }
+    char word[16];
+    trim_copy(json_str(j, "confirm"), word, sizeof(word));
+    cJSON_Delete(j);
+    if (strcmp(word, "RESET") != 0) {
+        return send_msg(req, "400 Bad Request", false, "Type RESET in capital letters to confirm.");
+    }
+    if (twilio_provision_running()) {
+        return send_msg(req, "409 Conflict", false, "Setup is running. Try again when it has finished.");
+    }
+    static bool s_started;
+    if (s_started || xTaskCreate(factory_reset_task, "freset", 4096, NULL, 5, NULL) != pdPASS) {
+        return send_msg(req, s_started ? "409 Conflict" : "500 Internal Server Error", false,
+                        s_started ? "The phone is already erasing." : "Could not start. Try again.");
+    }
+    s_started = true;
+    ESP_LOGW(TAG, "factory reset requested from the web page");
+    return send_msg(req, "202 Accepted", true, "Erasing. The phone restarts in a few seconds.");
 }
 
 /* ---------------------------------------------------------------------------
@@ -589,7 +937,7 @@ void setup_server_start(void)
     cfg.server_port = APP_HTTP_PORT;
     cfg.stack_size = APP_HTTP_STACK;
     cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 8;
+    cfg.max_uri_handlers = 16; /* 12 registered */
     cfg.lru_purge_enable = true;
     cfg.core_id = 0;
     httpd_handle_t srv = NULL;
@@ -603,11 +951,21 @@ void setup_server_start(void)
         {.uri = "/api/status", .method = HTTP_GET, .handler = h_status},
         {.uri = "/api/provision", .method = HTTP_POST, .handler = h_provision},
         {.uri = "/api/contacts", .method = HTTP_POST, .handler = h_contacts},
+        {.uri = "/api/settings", .method = HTTP_POST, .handler = h_settings},
         {.uri = "/api/call", .method = HTTP_POST, .handler = h_call},
         {.uri = "/api/hangup", .method = HTTP_POST, .handler = h_hangup},
+        {.uri = "/api/factory_reset", .method = HTTP_POST, .handler = h_factory_reset},
+        {.uri = "/api/wifi", .method = HTTP_GET, .handler = h_wifi},
+        {.uri = "/api/wifi/scan", .method = HTTP_POST, .handler = h_wifi_scan},
+        {.uri = "/api/wifi/add", .method = HTTP_POST, .handler = h_wifi_add},
+        {.uri = "/api/wifi/remove", .method = HTTP_POST, .handler = h_wifi_remove},
     };
+    _Static_assert(sizeof(uris) / sizeof(uris[0]) <= 16, "raise max_uri_handlers");
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
-        httpd_register_uri_handler(srv, &uris[i]);
+        esp_err_t e = httpd_register_uri_handler(srv, &uris[i]);
+        if (e != ESP_OK) {
+            ESP_LOGE(TAG, "register %s failed: %s", uris[i].uri, esp_err_to_name(e));
+        }
     }
     ESP_LOGI(TAG, "setup page: http://%s.local/ (port %d)", APP_HOSTNAME, APP_HTTP_PORT);
 }

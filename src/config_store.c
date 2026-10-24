@@ -9,6 +9,8 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
+#include "app_config.h"
+
 /* Optional developer override (gitignored). The build works without it. */
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -20,6 +22,10 @@ static const char *NS = "kidphone";
 static app_cfg_t s_cfg;
 static SemaphoreHandle_t s_lock;
 static uint32_t s_gen;
+
+/* Saved WiFi networks, oldest first, packed from index 0. */
+static cfg_wifi_t s_wifi[CFG_MAX_WIFI];
+static int s_nwifi;
 
 /* Stored schedule (NVS blob "c<i>_sch"). Fixed layout, versioned so a later
  * firmware can extend it; a blob with an unknown version or size is ignored
@@ -131,12 +137,29 @@ bool config_any_contact(const cfg_contact_t *contacts)
 static void load(void)
 {
     memset(&s_cfg, 0, sizeof(s_cfg));
+    mbedtls_platform_zeroize(s_wifi, sizeof(s_wifi));
+    s_nwifi = 0;
+    s_cfg.max_call_min = APP_CALL_MAX_MIN_DEFAULT;
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) {
         return; /* namespace does not exist yet: empty config */
     }
-    get_str(h, "wifi_ssid", s_cfg.wifi_ssid, sizeof(s_cfg.wifi_ssid));
-    get_str(h, "wifi_pass", s_cfg.wifi_pass, sizeof(s_cfg.wifi_pass));
+    /* WiFi slots w0..w4; an empty or missing SSID is skipped, so a gap left
+     * by an interrupted write cannot hide the slots after it. */
+    s_nwifi = 0;
+    for (int i = 0; i < CFG_MAX_WIFI; i++) {
+        char k[12];
+        cfg_wifi_t *w = &s_wifi[s_nwifi];
+        snprintf(k, sizeof(k), "w%d_ssid", i);
+        get_str(h, k, w->ssid, sizeof(w->ssid));
+        snprintf(k, sizeof(k), "w%d_pass", i);
+        get_str(h, k, w->pass, sizeof(w->pass));
+        if (w->ssid[0]) {
+            s_nwifi++;
+        } else {
+            mbedtls_platform_zeroize(w, sizeof(*w));
+        }
+    }
     get_str(h, "sip_domain", s_cfg.sip_domain, sizeof(s_cfg.sip_domain));
     get_str(h, "sip_user", s_cfg.sip_user, sizeof(s_cfg.sip_user));
     get_str(h, "sip_pass", s_cfg.sip_pass, sizeof(s_cfg.sip_pass));
@@ -149,6 +172,15 @@ static void load(void)
         snprintf(k, sizeof(k), "c%d_num", i);
         get_str(h, k, s_cfg.contacts[i].number, sizeof(s_cfg.contacts[i].number));
         load_sched(h, i, &s_cfg.contacts[i].sched);
+    }
+    get_str(h, "tw_key_sid", s_cfg.key_sid, sizeof(s_cfg.key_sid));
+    get_str(h, "tw_key_sec", s_cfg.key_secret, sizeof(s_cfg.key_secret));
+    get_str(h, "tw_svc", s_cfg.svc_sid, sizeof(s_cfg.svc_sid));
+    get_str(h, "tw_env", s_cfg.env_sid, sizeof(s_cfg.env_sid));
+    nvs_get_u8(h, "tw_prog", &s_cfg.call_program);
+    uint16_t mc = 0;
+    if (nvs_get_u16(h, "max_call_min", &mc) == ESP_OK && mc >= APP_CALL_MAX_MIN_LO && mc <= APP_CALL_MAX_MIN_HI) {
+        s_cfg.max_call_min = mc;
     }
     uint8_t p = 0;
     nvs_get_u8(h, "provisioned", &p);
@@ -166,6 +198,225 @@ static size_t copy_str(char *dst, size_t cap, const char *src)
     return n;
 }
 
+/* ---------------------------------------------------------------------------
+ * WiFi networks
+ * ------------------------------------------------------------------------- */
+
+static int wifi_find_locked(const char *ssid)
+{
+    for (int i = 0; i < s_nwifi; i++) {
+        if (strcmp(s_wifi[i].ssid, ssid) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* Write slots 0..s_nwifi-1 and erase the rest (caller holds the lock). */
+static esp_err_t wifi_save_locked(nvs_handle_t h)
+{
+    esp_err_t err = ESP_OK;
+    for (int i = 0; i < CFG_MAX_WIFI; i++) {
+        char ks[12], kp[12];
+        snprintf(ks, sizeof(ks), "w%d_ssid", i);
+        snprintf(kp, sizeof(kp), "w%d_pass", i);
+        if (i < s_nwifi) {
+            err |= nvs_set_str(h, ks, s_wifi[i].ssid);
+            err |= nvs_set_str(h, kp, s_wifi[i].pass);
+        } else {
+            esp_err_t e = nvs_erase_key(h, ks);
+            err |= e == ESP_ERR_NVS_NOT_FOUND ? ESP_OK : e;
+            e = nvs_erase_key(h, kp);
+            err |= e == ESP_ERR_NVS_NOT_FOUND ? ESP_OK : e;
+        }
+    }
+    return err;
+}
+
+static void wifi_drop_locked(int idx)
+{
+    memmove(&s_wifi[idx], &s_wifi[idx + 1], sizeof(s_wifi[0]) * (size_t)(s_nwifi - idx - 1));
+    s_nwifi--;
+    mbedtls_platform_zeroize(&s_wifi[s_nwifi], sizeof(s_wifi[0]));
+}
+
+/* Add or update in RAM (caller holds the lock and saves). */
+static esp_err_t wifi_add_locked(const char *ssid, const char *pass, const char *evict_except, bool *updated)
+{
+    int idx = wifi_find_locked(ssid);
+    if (updated) {
+        *updated = idx >= 0;
+    }
+    if (idx < 0) {
+        if (s_nwifi == CFG_MAX_WIFI) {
+            if (!evict_except) {
+                return ESP_ERR_NO_MEM;
+            }
+            int victim = 0;
+            while (victim < s_nwifi && strcmp(s_wifi[victim].ssid, evict_except) == 0) {
+                victim++;
+            }
+            ESP_LOGW(TAG, "WiFi list full: forgetting the oldest network \"%s\"", s_wifi[victim].ssid);
+            wifi_drop_locked(victim);
+        }
+        idx = s_nwifi++;
+        copy_str(s_wifi[idx].ssid, sizeof(s_wifi[idx].ssid), ssid);
+    }
+    mbedtls_platform_zeroize(s_wifi[idx].pass, sizeof(s_wifi[idx].pass));
+    copy_str(s_wifi[idx].pass, sizeof(s_wifi[idx].pass), pass);
+    return ESP_OK;
+}
+
+/*
+ * Firmware before multi-network support kept one network in wifi_ssid /
+ * wifi_pass. Move it into the list (unless it is there already), commit,
+ * and only then erase the old keys, so a power cut at any point leaves the
+ * network in at least one place and the next boot finishes the job.
+ */
+static void migrate_legacy_wifi(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) {
+        return;
+    }
+    cfg_wifi_t old = {0};
+    get_str(h, "wifi_ssid", old.ssid, sizeof(old.ssid));
+    get_str(h, "wifi_pass", old.pass, sizeof(old.pass));
+    size_t n = 0;
+    bool any_key = nvs_get_str(h, "wifi_ssid", NULL, &n) == ESP_OK || nvs_get_str(h, "wifi_pass", NULL, &n) == ESP_OK;
+    if (!any_key) {
+        nvs_close(h);
+        return;
+    }
+    esp_err_t err = ESP_OK;
+    lock();
+    if (old.ssid[0] && wifi_find_locked(old.ssid) < 0) {
+        /* The network the older firmware was using is the newest one. */
+        err = wifi_add_locked(old.ssid, old.pass, "", NULL);
+        if (err == ESP_OK) {
+            err = wifi_save_locked(h);
+        }
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        s_gen++;
+        ESP_LOGI(TAG, "moved the saved WiFi network into the network list (%s)", esp_err_to_name(err));
+    }
+    unlock();
+    if (err == ESP_OK) {
+        esp_err_t e1 = nvs_erase_key(h, "wifi_ssid");
+        esp_err_t e2 = nvs_erase_key(h, "wifi_pass");
+        if ((e1 == ESP_OK || e1 == ESP_ERR_NVS_NOT_FOUND) && (e2 == ESP_OK || e2 == ESP_ERR_NVS_NOT_FOUND)) {
+            nvs_commit(h);
+        }
+    }
+    nvs_close(h);
+    mbedtls_platform_zeroize(&old, sizeof(old));
+}
+
+static bool wifi_args_ok(const char *ssid, const char *pass)
+{
+    size_t sl = ssid ? strlen(ssid) : 0;
+    size_t pl = pass ? strlen(pass) : 0;
+    return sl >= 1 && sl <= 32 && pl <= 64;
+}
+
+int config_wifi_count(void)
+{
+    lock();
+    int n = s_nwifi;
+    unlock();
+    return n;
+}
+
+int config_wifi_get(cfg_wifi_t *out, int max)
+{
+    lock();
+    int n = s_nwifi < max ? s_nwifi : max;
+    memcpy(out, s_wifi, sizeof(s_wifi[0]) * (size_t)n);
+    unlock();
+    return n;
+}
+
+int config_wifi_list(cfg_wifi_info_t *out, int max)
+{
+    lock();
+    int n = s_nwifi < max ? s_nwifi : max;
+    for (int i = 0; i < n; i++) {
+        strlcpy(out[i].ssid, s_wifi[i].ssid, sizeof(out[i].ssid));
+        out[i].secured = s_wifi[i].pass[0] != '\0';
+    }
+    unlock();
+    return n;
+}
+
+bool config_wifi_has(const char *ssid)
+{
+    lock();
+    bool r = wifi_find_locked(ssid) >= 0;
+    unlock();
+    return r;
+}
+
+esp_err_t config_wifi_add(const char *ssid, const char *pass, const char *evict_except, bool *updated)
+{
+    if (!wifi_args_ok(ssid, pass)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    lock();
+    err = wifi_add_locked(ssid, pass ? pass : "", evict_except, updated);
+    if (err == ESP_OK) {
+        err = wifi_save_locked(h);
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        s_gen++;
+    }
+    int n = s_nwifi;
+    unlock();
+    nvs_close(h);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "WiFi network \"%s\" saved (%d of %d)", ssid, n, CFG_MAX_WIFI);
+    } else if (err != ESP_ERR_NO_MEM) {
+        ESP_LOGE(TAG, "saving WiFi network failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+esp_err_t config_wifi_remove(const char *ssid)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    lock();
+    int idx = wifi_find_locked(ssid);
+    if (idx < 0) {
+        err = ESP_ERR_NOT_FOUND;
+    } else if (s_nwifi <= 1) {
+        err = ESP_ERR_INVALID_STATE;
+    } else {
+        wifi_drop_locked(idx);
+        err = wifi_save_locked(h);
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        s_gen++;
+    }
+    unlock();
+    nvs_close(h);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "WiFi network \"%s\" removed", ssid);
+    }
+    return err;
+}
+
 /* secrets.h.example placeholders are not real values. */
 static bool __attribute__((unused)) is_placeholder(const char *v)
 {
@@ -178,9 +429,9 @@ static bool __attribute__((unused)) is_placeholder(const char *v)
 static void seed_from_secrets(void)
 {
 #ifdef WIFI_SSID
-    if (!s_cfg.wifi_ssid[0] && !is_placeholder(WIFI_SSID)) {
+    if (config_wifi_count() == 0 && !is_placeholder(WIFI_SSID)) {
         ESP_LOGI(TAG, "seeding WiFi credentials from secrets.h");
-        config_set_wifi(WIFI_SSID, WIFI_PASS);
+        config_wifi_add(WIFI_SSID, WIFI_PASS, NULL, NULL);
     }
 #endif
 #if defined(SIP_DOMAIN) && defined(SIP_USER) && defined(SIP_PASSWORD) && defined(TEST_DEST_NUMBER)
@@ -213,10 +464,13 @@ void config_store_init(void)
     lock();
     load();
     unlock();
+    migrate_legacy_wifi();
     seed_from_secrets();
 
-    ESP_LOGI(TAG, "config: wifi %s, twilio %s", s_cfg.wifi_ssid[0] ? "set" : "NOT SET",
-             s_cfg.provisioned ? "provisioned" : "NOT SET UP");
+    const int nw = config_wifi_count();
+    ESP_LOGI(TAG, "config: wifi %d network%s%s, twilio %s, numbers key %s", nw, nw == 1 ? "" : "s",
+             nw ? "" : " (NOT SET)",
+             s_cfg.provisioned ? "provisioned" : "NOT SET UP", config_has_twilio_key() ? "yes" : "no");
     for (int i = 0; i < CFG_MAX_CONTACTS; i++) {
         const char *n = s_cfg.contacts[i].number;
         size_t nl = strlen(n);
@@ -241,10 +495,7 @@ void config_wipe(app_cfg_t *c)
 
 bool config_has_wifi(void)
 {
-    lock();
-    bool r = s_cfg.wifi_ssid[0] != '\0';
-    unlock();
-    return r;
+    return config_wifi_count() > 0;
 }
 
 bool config_is_provisioned(void)
@@ -272,32 +523,6 @@ bool config_get_contact(int idx, cfg_contact_t *out)
     *out = s_cfg.contacts[idx];
     unlock();
     return out->number[0] != '\0';
-}
-
-esp_err_t config_set_wifi(const char *ssid, const char *pass)
-{
-    nvs_handle_t h;
-    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
-    if (err != ESP_OK) {
-        return err;
-    }
-    lock();
-    copy_str(s_cfg.wifi_ssid, sizeof(s_cfg.wifi_ssid), ssid);
-    copy_str(s_cfg.wifi_pass, sizeof(s_cfg.wifi_pass), pass);
-    err = nvs_set_str(h, "wifi_ssid", s_cfg.wifi_ssid);
-    if (err == ESP_OK) {
-        err = nvs_set_str(h, "wifi_pass", s_cfg.wifi_pass);
-    }
-    s_gen++;
-    unlock();
-    if (err == ESP_OK) {
-        err = nvs_commit(h);
-    }
-    nvs_close(h);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "saving WiFi credentials failed: %s", esp_err_to_name(err));
-    }
-    return err;
 }
 
 esp_err_t config_set_twilio(const char *account_sid, const char *sip_domain, const char *sip_user,
@@ -336,6 +561,31 @@ esp_err_t config_set_twilio(const char *account_sid, const char *sip_domain, con
     return ESP_OK;
 }
 
+esp_err_t config_set_sip_login(const char *sip_user, const char *sip_pass)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    lock();
+    copy_str(s_cfg.sip_user, sizeof(s_cfg.sip_user), sip_user);
+    copy_str(s_cfg.sip_pass, sizeof(s_cfg.sip_pass), sip_pass);
+    err |= nvs_set_str(h, "sip_user", s_cfg.sip_user);
+    err |= nvs_set_str(h, "sip_pass", s_cfg.sip_pass);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    s_gen++;
+    unlock();
+    nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "saving SIP login failed");
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
 esp_err_t config_set_contacts(const cfg_contact_t *contacts)
 {
     nvs_handle_t h;
@@ -360,6 +610,113 @@ esp_err_t config_set_contacts(const cfg_contact_t *contacts)
     return ESP_OK;
 }
 
+/* Set (non-empty) or erase (empty) one string key. */
+static esp_err_t put_str(nvs_handle_t h, const char *key, const char *val)
+{
+    if (val[0]) {
+        return nvs_set_str(h, key, val);
+    }
+    esp_err_t err = nvs_erase_key(h, key);
+    return err == ESP_ERR_NVS_NOT_FOUND ? ESP_OK : err;
+}
+
+esp_err_t config_set_twilio_key(const char *key_sid, const char *key_secret, const char *svc_sid,
+                                const char *env_sid)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    lock();
+    copy_str(s_cfg.key_sid, sizeof(s_cfg.key_sid), key_sid);
+    copy_str(s_cfg.key_secret, sizeof(s_cfg.key_secret), key_secret);
+    copy_str(s_cfg.svc_sid, sizeof(s_cfg.svc_sid), svc_sid);
+    copy_str(s_cfg.env_sid, sizeof(s_cfg.env_sid), env_sid);
+    err |= put_str(h, "tw_key_sid", s_cfg.key_sid);
+    err |= put_str(h, "tw_key_sec", s_cfg.key_secret);
+    err |= put_str(h, "tw_svc", s_cfg.svc_sid);
+    err |= put_str(h, "tw_env", s_cfg.env_sid);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    s_gen++;
+    unlock();
+    nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "saving the Twilio key failed");
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+esp_err_t config_set_call_program(uint8_t version)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    lock();
+    err = nvs_set_u8(h, "tw_prog", version);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    if (err == ESP_OK) {
+        s_cfg.call_program = version;
+    }
+    s_gen++;
+    unlock();
+    nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "saving the call program version failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+uint16_t config_max_call_minutes(void)
+{
+    lock();
+    uint16_t m = s_cfg.max_call_min;
+    unlock();
+    return m;
+}
+
+esp_err_t config_set_max_call_minutes(unsigned minutes)
+{
+    if (minutes < APP_CALL_MAX_MIN_LO || minutes > APP_CALL_MAX_MIN_HI) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    lock();
+    err = nvs_set_u16(h, "max_call_min", (uint16_t)minutes);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    if (err == ESP_OK) {
+        s_cfg.max_call_min = (uint16_t)minutes;
+    }
+    s_gen++;
+    unlock();
+    nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "saving the call length failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+bool config_has_twilio_key(void)
+{
+    lock();
+    bool r = s_cfg.key_sid[0] && s_cfg.key_secret[0] && s_cfg.svc_sid[0] && s_cfg.env_sid[0];
+    unlock();
+    return r;
+}
+
 esp_err_t config_factory_reset(void)
 {
     nvs_handle_t h;
@@ -373,6 +730,9 @@ esp_err_t config_factory_reset(void)
     }
     lock();
     mbedtls_platform_zeroize(&s_cfg, sizeof(s_cfg));
+    mbedtls_platform_zeroize(s_wifi, sizeof(s_wifi));
+    s_nwifi = 0;
+    s_cfg.max_call_min = APP_CALL_MAX_MIN_DEFAULT;
     s_gen++;
     unlock();
     ESP_LOGW(TAG, "factory reset: config erased (%s)", esp_err_to_name(err));

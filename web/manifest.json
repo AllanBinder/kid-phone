@@ -1,6 +1,6 @@
 {
   "name": "Kid Phone",
-  "version": "dev",
+  "version": "0.3.0",
   "new_install_prompt_erase": true,
   "new_install_improv_wait_time": 20,
   "builds": [

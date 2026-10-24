@@ -23,16 +23,31 @@
 #define APP_CONTACT_LED_GPIOS   {15, 16, 17, 18}
 #define APP_BUTTON_DEBOUNCE_MS  30
 #define APP_BUTTON_POLL_MS      5
-/* Holding button 0 this long while idle cycles the audio test modes A-D. */
+/* Contact buttons only call and hang up: one action per press, on the press
+ * edge, never on a hold. The parent-only controls are on the board's BOOT
+ * button instead (GPIO 0, active low, on-board pull-up). GPIO 0 is a
+ * strapping pin: it is only read at runtime, never driven, and the reboot
+ * after a factory reset waits for it to be released so the chip does not
+ * come back up in download mode.
+ *   short press (released before APP_BUTTON_LONG_MS), idle: cycle the audio
+ *     test modes A-D
+ *   hold APP_FACTORY_RESET_MS, any state: erase the NVS config (WiFi,
+ *     Twilio, contacts) and reboot into setup; the status LED warns from
+ *     APP_BUTTON_LONG_MS on, and releasing before the end cancels */
+#define APP_BOOT_GPIO           0
 #define APP_BUTTON_LONG_MS      1500
-/* Holding button 0 this long in any state erases the NVS config (WiFi,
- * Twilio, contacts) and reboots into setup. */
 #define APP_FACTORY_RESET_MS    10000
+/* After the BOOT reset has erased the config, reboot anyway if the button is
+ * still held this long (stuck switch). */
+#define APP_BOOT_RELEASE_WAIT_MS 30000
 /* Contact LED blink half-period while that contact is being called. */
 #define APP_CONTACT_LED_BLINK_MS 300
 /* Busy tone length when a button has no contact or the contact is outside
  * their available hours (no call is placed). */
 #define APP_SHORT_BUSY_MS       2500
+/* Presses are ignored while a spoken prompt plays and for this long after a
+ * call ends or fails, so mashing a button cannot place a burst of calls. */
+#define APP_PRESS_COOLDOWN_MS   3000
 
 /* Availability schedules: re-evaluated this often (and on config changes). */
 #define APP_SCHED_EVAL_MS       1000
@@ -42,7 +57,9 @@
 #define APP_NTP_SERVER_2        "time.google.com"
 
 /* A call that Twilio answers and then hangs up within this long most likely
- * never reached the far end (geo permissions, trial account). */
+ * never reached the far end (geo permissions, trial account). twilio/voice.js
+ * (NO_ANSWER_PAUSE_S) keeps its "didn't answer" ending longer than this:
+ * change both together. */
 #define APP_SHORT_CALL_MS       5000
 
 /* Audio block size in milliseconds. Every pass of the audio task moves one
@@ -53,6 +70,20 @@
 #define APP_SPK_VOLUME_PCT      100
 /* Mic volume, only applied if the device exposes a mic volume control. */
 #define APP_MIC_VOLUME_PCT      80
+
+/* Idle earpiece sound. 0 (default): the earpiece is silent whenever the phone
+ * is idle, in every state (ready, no WiFi, not set up), because there is no
+ * hook switch yet and a handset on the table would play a tone all day. Sound
+ * only follows a press: the spoken prompt, the short busy tone after a failed
+ * call or refused press, ringback and the call itself, then silence again.
+ * The contact lights show whether the phone can call. 1: the old idle status
+ * tones (dial tone when ready, slow beep with no WiFi, reorder when not set
+ * up); meant to come back as "dial tone only off-hook" once a hook switch
+ * exists. */
+#define APP_IDLE_DIAL_TONE      0
+
+/* Tone start, stop and cadence edges ramp over this long (no clicks). */
+#define APP_TONE_RAMP_MS        5
 
 /* US dial tone: 350 Hz + 440 Hz, each tone at this linear amplitude
  * (fraction of full scale). 0.1 each is about -14 dBFS peak for the sum. */
@@ -79,6 +110,9 @@
 
 /* Telephone band low-pass corner used by both decimator and interpolator. */
 #define APP_TEL_CUTOFF_HZ       3500.0f
+/* Spoken prompts (16 kHz clips): low-pass corner of the interpolator to the
+ * earpiece rate, under the clips' 8 kHz Nyquist limit. */
+#define APP_PROMPT_CUTOFF_HZ    7000.0f
 
 /* Driver ring buffers, in blocks of APP_BLOCK_MS. The TX ring depth sets most
  * of the output latency; the write call blocks when it is full, which is what
@@ -98,8 +132,21 @@
  * Stage 2: WiFi, SIP, RTP
  * ------------------------------------------------------------------------- */
 
-/* WiFi reconnect delay after a disconnect. */
-#define APP_WIFI_RETRY_MS       2000
+/* WiFi connection policy (src/wifi.c). At boot and after every disconnect
+ * the phone scans all channels, then tries the saved networks it can see,
+ * strongest first. A round where none of them works is followed by a pause
+ * that starts at BACKOFF_MIN and doubles up to BACKOFF_MAX, then a rescan,
+ * forever. ATTEMPT_MS bounds one connect attempt (association, WPA handshake
+ * and DHCP); SCAN_TIMEOUT_MS bounds one scan. */
+#define APP_WIFI_BACKOFF_MIN_MS 10000
+#define APP_WIFI_BACKOFF_MAX_MS 60000
+#define APP_WIFI_ATTEMPT_MS     20000
+#define APP_WIFI_SCAN_TIMEOUT_MS 10000
+
+/* A call whose WiFi is gone this long, or that finds the phone on a new IP
+ * address (another network), is ended locally: its SIP and media addresses
+ * are dead. */
+#define APP_SIP_NET_LOSS_MS     10000
 
 /* SIP over UDP. One local socket, bound to this port, used for both send
  * and receive. The server is SIP_DOMAIN (secrets.h) on APP_SIP_SERVER_PORT. */
@@ -115,6 +162,13 @@
 
 /* Give up on a call nobody answers: CANCEL after this long. */
 #define APP_SIP_RING_TIMEOUT_MS 90000
+
+/* Longest call, in minutes: the phone sends BYE and says "Time's up". The
+ * parent sets it on the setup page (NVS "max_call_min"); out-of-range
+ * values are refused there and replaced by the default on load. */
+#define APP_CALL_MAX_MIN_DEFAULT 30
+#define APP_CALL_MAX_MIN_LO     1
+#define APP_CALL_MAX_MIN_HI     120
 
 /* During a call, send a CRLF keepalive to the SIP server this often so the
  * home NAT keeps the SIP mapping open for the remote BYE. */
@@ -165,6 +219,12 @@
 /* Twilio provisioning task. TLS + JSON parsing need a big stack. */
 #define APP_PROV_STACK          16384
 #define APP_PROV_HTTP_TIMEOUT_MS 20000
+/* Twilio requests that fail in transport, or get 429 / 5xx, are tried up to
+ * this many times in all, waiting APP_PROV_RETRY_MS, 2x, 4x between tries
+ * (creates only when they provably never reached Twilio, see
+ * twilio_provision.c). */
+#define APP_PROV_HTTP_TRIES     4
+#define APP_PROV_RETRY_MS       1000
 /* Largest Twilio API response accepted (list pages land in PSRAM). */
 #define APP_PROV_MAX_RESP       (256 * 1024)
 #define APP_PROV_BUILD_TIMEOUT_MS 120000
@@ -183,6 +243,18 @@
 #define APP_TW_LEGACY_SIP_USER  "handset1"
 #define APP_TW_ENV_NAME         "prod"
 #define APP_TW_FN_NAME          "voice"
+/* Serverless Asset with the "They didn't answer the phone." clip
+ * (twilio/no_answer.wav), public at https://<env domain>/no-answer.wav. The
+ * path must match NO_ANSWER_ASSET in twilio/voice.js. */
+#define APP_TW_ASSET_NAME       "no-answer"
+#define APP_TW_ASSET_PATH       "/no-answer.wav"
+/* What a full setup installs in Twilio (voice.js and its assets). Bump it
+ * whenever twilio/voice.js or an asset changes: a phone whose stored value
+ * (NVS tw_prog, 0 = set up before this marker existed) is lower shows "Run
+ * setup again" on the setup page. Numbers-only updates redeploy the build
+ * that is live and do not change it.
+ *   2  (2026-10-18): Dial action, spoken "They didn't answer the phone." */
+#define APP_TW_PROGRAM_VERSION  2
 
 /* Onboard WS2812 RGB LED (GPIO 48 on this DevKitC clone; some boards use 38). */
 #define APP_LED_GPIO            48
