@@ -17,6 +17,7 @@ CLIP(no_answer)
 CLIP(no_wifi)
 CLIP(not_ready)
 CLIP(cant_call)
+CLIP(sleep_time)
 
 typedef struct {
     const char *name;
@@ -31,6 +32,7 @@ static const clip_t k_clips[PROMPT_COUNT] = {
     [PROMPT_NO_WIFI] = {"no_wifi", no_wifi_start, no_wifi_end},
     [PROMPT_NOT_READY] = {"not_ready", not_ready_start, not_ready_end},
     [PROMPT_CANT_CALL] = {"cant_call", cant_call_start, cant_call_end},
+    [PROMPT_SLEEP_TIME] = {"sleep_time", sleep_time_start, sleep_time_end},
 };
 
 /* Requests are numbered; the prompt is active until the audio task reports

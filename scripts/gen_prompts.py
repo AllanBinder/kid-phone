@@ -82,6 +82,7 @@ PROMPTS = {
     "no_wifi": "The phone isn't connected. Ask a grown-up for help.",
     "not_ready": "This phone isn't ready yet. Ask a grown-up for help.",
     "cant_call": "The phone can't make calls right now. Ask a grown-up to check the phone.",
+    "sleep_time": "It's sleep time. You can call in the morning.",
 }
 
 

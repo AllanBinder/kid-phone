@@ -24,6 +24,7 @@ typedef enum {
     PROMPT_NO_WIFI,     /* "The phone isn't connected. Ask a grown-up for help." */
     PROMPT_NOT_READY,   /* "This phone isn't ready yet. Ask a grown-up for help." */
     PROMPT_CANT_CALL,   /* "The phone can't make calls right now. Ask a grown-up to check the phone." */
+    PROMPT_SLEEP_TIME,  /* "It's sleep time. You can call in the morning." */
     PROMPT_COUNT
 } prompt_id_t;
 

@@ -130,6 +130,28 @@ static esp_err_t h_page(httpd_req_t *req)
     return httpd_resp_send(req, page_start, page_end - page_start - 1);
 }
 
+static void add_hhmm(cJSON *o, const char *key, unsigned minute)
+{
+    char hm[16];
+    minute %= 1440u;
+    snprintf(hm, sizeof(hm), "%02u:%02u", minute / 60u, minute % 60u);
+    cJSON_AddStringToObject(o, key, hm);
+}
+
+/* Bedtime settings plus the live state (asleep now or not). */
+static void bedtime_json(cJSON *o, const cfg_bedtime_t *b)
+{
+    cJSON_AddBoolToObject(o, "enabled", b->enabled);
+    add_hhmm(o, "start", b->start_min);
+    add_hhmm(o, "end", b->end_min);
+    cJSON_AddStringToObject(o, "tz", b->tz);
+    cJSON_AddStringToObject(o, "tz_name", b->tz_name);
+    bedtime_state_t bs;
+    schedule_bedtime_eval(b, &bs);
+    cJSON_AddBoolToObject(o, "scheduled", bs.scheduled);
+    cJSON_AddBoolToObject(o, "active", bs.active);
+}
+
 static cJSON *contact_json(const cfg_contact_t *ct)
 {
     static const char *days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
@@ -154,12 +176,9 @@ static cJSON *contact_json(const cfg_contact_t *ct)
     cJSON_AddBoolToObject(ci, "available", ct->number[0] && st.available);
     cJSON_AddBoolToObject(ci, "scheduled", st.scheduled);
     if (st.has_next) {
-        char hm[16];
-        const unsigned nm = (unsigned)st.next_minute % 1440u;
-        snprintf(hm, sizeof(hm), "%02u:%02u", nm / 60u, nm % 60u);
         cJSON *n = cJSON_AddObjectToObject(ci, "next");
         cJSON_AddStringToObject(n, "day", days[st.next_wday]);
-        cJSON_AddStringToObject(n, "time", hm);
+        add_hhmm(n, "time", (unsigned)st.next_minute);
     }
     return ci;
 }
@@ -275,6 +294,7 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(set, "max_call_minutes", c.max_call_min);
     cJSON_AddNumberToObject(set, "max_call_minutes_lo", APP_CALL_MAX_MIN_LO);
     cJSON_AddNumberToObject(set, "max_call_minutes_hi", APP_CALL_MAX_MIN_HI);
+    bedtime_json(cJSON_AddObjectToObject(o, "bedtime"), &c.bedtime);
     config_wipe(&c);
     cJSON_AddBoolToObject(o, "time_synced", schedule_time_synced());
 
@@ -645,7 +665,48 @@ static esp_err_t h_settings(httpd_req_t *req)
     return send_msg(req, "200 OK", true, "Saved.");
 }
 
-/* POST /api/call {contact: i}: test call, same rules as button i. */
+/*
+ * POST /api/bedtime {enabled, start, end, tz, tz_name}: the nightly bedtime
+ * window ("HH:MM" or minutes, home time) and the home time zone. Device
+ * only, no Twilio and no Auth Token.
+ */
+static esp_err_t h_bedtime(httpd_req_t *req)
+{
+    if (!post_ok(req)) {
+        return ESP_OK;
+    }
+    cJSON *j = read_json(req);
+    if (!j) {
+        return send_msg(req, "400 Bad Request", false, "Missing, too large or bad request.");
+    }
+    cfg_bedtime_t b = {0};
+    b.enabled = cJSON_IsTrue(cJSON_GetObjectItem(j, "enabled"));
+    const int start = json_minutes(cJSON_GetObjectItem(j, "start"));
+    const int end = json_minutes(cJSON_GetObjectItem(j, "end"));
+    trim_copy(json_str(j, "tz"), b.tz, sizeof(b.tz));
+    trim_copy(json_str(j, "tz_name"), b.tz_name, sizeof(b.tz_name));
+    cJSON_Delete(j);
+    if (start < 0 || start >= 1440 || end < 0 || end >= 1440) {
+        return send_msg(req, "400 Bad Request", false, "Fill in both bedtime times.");
+    }
+    b.start_min = (uint16_t)start;
+    b.end_min = (uint16_t)end;
+    const char *why = schedule_bedtime_validate(&b);
+    if (why) {
+        char e[80];
+        snprintf(e, sizeof(e), "Bedtime: %s.", why);
+        return send_msg(req, "400 Bad Request", false, e);
+    }
+    if (config_set_bedtime(&b) != ESP_OK) {
+        return send_msg(req, "500 Internal Server Error", false, "Could not save. Try again.");
+    }
+    ESP_LOGI(TAG, "bedtime %s (%02d:%02d to %02d:%02d) from the web page", b.enabled ? "on" : "off", start / 60,
+             start % 60, end / 60, end % 60);
+    return send_msg(req, "200 OK", true, "Saved.");
+}
+
+/* POST /api/call {contact: i}: test call, same rules as button i, except
+ * bedtime: this is the parent testing, so it calls during bedtime too. */
 static esp_err_t h_call(httpd_req_t *req)
 {
     if (!post_ok(req)) {
@@ -882,7 +943,7 @@ static void factory_reset_task(void *arg)
 
 /*
  * POST /api/factory_reset {confirm: "RESET"}: erase everything (WiFi,
- * Twilio, numbers key, contacts, call length) and reboot into setup. The
+ * Twilio, numbers key, contacts, call length, bedtime) and reboot into setup. The
  * confirmation word is checked here too, not only on the page.
  */
 static esp_err_t h_factory_reset(httpd_req_t *req)
@@ -937,7 +998,7 @@ void setup_server_start(void)
     cfg.server_port = APP_HTTP_PORT;
     cfg.stack_size = APP_HTTP_STACK;
     cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 16; /* 12 registered */
+    cfg.max_uri_handlers = 16; /* 13 registered */
     cfg.lru_purge_enable = true;
     cfg.core_id = 0;
     httpd_handle_t srv = NULL;
@@ -952,6 +1013,7 @@ void setup_server_start(void)
         {.uri = "/api/provision", .method = HTTP_POST, .handler = h_provision},
         {.uri = "/api/contacts", .method = HTTP_POST, .handler = h_contacts},
         {.uri = "/api/settings", .method = HTTP_POST, .handler = h_settings},
+        {.uri = "/api/bedtime", .method = HTTP_POST, .handler = h_bedtime},
         {.uri = "/api/call", .method = HTTP_POST, .handler = h_call},
         {.uri = "/api/hangup", .method = HTTP_POST, .handler = h_hangup},
         {.uri = "/api/factory_reset", .method = HTTP_POST, .handler = h_factory_reset},

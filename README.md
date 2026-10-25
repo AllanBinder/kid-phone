@@ -55,6 +55,22 @@ pressing the button again calls back. After any call ends, presses are
 ignored for 3 seconds, and while the phone is talking, so a child mashing
 the buttons cannot place a burst of calls.
 
+**Bedtime** (optional, off by default): on the setup page's **Bedtime**
+card, turn on "Put the phone to sleep at night" and set when the lights go
+off and come back on (say 19:30 to 07:00; a window that ends earlier than
+it starts runs into the next morning). Pick the **home time zone**, where
+the phone is (it starts on your computer's own zone). During bedtime every
+contact light is off, even for people who are available, and pressing a
+button says "It's sleep time. You can call in the morning." (then a short
+busy tone) instead of calling. At the end time the lights come back on by
+themselves, each following that person's own times as usual. A call that
+is already going when bedtime starts is not cut off (the call length limit
+still ends it), and the **Call** buttons on the setup page keep working, so
+you can still test. Until the phone's clock has synced, bedtime is not
+applied. The card shows what is happening now, for example "Asleep now,
+lights back on at 07:00" or "Lights go off at 19:30". Changing bedtime
+never needs the Auth Token.
+
 If a person is in another country, turn that country on in the Twilio
 Console under Voice > Settings > Geo permissions. The phone does not change
 that setting.
@@ -108,7 +124,7 @@ for 10 s (factory reset) and set the phone up from step 1.
 `RESET` and press **Factory reset**. Or hold the **BOOT** button on the
 phone's board for 10 seconds (the light blinks amber from 1.5 s on; let go
 before 10 s to cancel). Either way the phone forgets everything (all saved
-WiFi networks, Twilio connection, people, times, call length) and restarts ready for step 1
+WiFi networks, Twilio connection, people, times, call length, bedtime) and restarts ready for step 1
 above. Nothing in your Twilio account is deleted. The contact buttons cannot
 reset the phone: holding them does nothing.
 
@@ -129,10 +145,11 @@ What the lights and the earpiece tell you:
 | all off | blue | silent | WiFi OK, Twilio not set up yet (a press says "This phone isn't ready yet") |
 | on for whoever can be called | green | silent | ready, press a lit button to call |
 | off for one person | green | silent | that slot is empty, or the person is outside their available hours |
+| all off | green | silent | bedtime (a press says "It's sleep time") |
 | | blue pulsing | silent | Twilio setup running |
 | that person's light blinks | white pulsing | ringback, then the call | in a call |
 | | | spoken sentence, then busy (480 + 620 Hz, 500 ms on/off) for 5 s | the last call failed |
-| | | spoken sentence, then busy for 2.5 s | the button pressed has nobody set up, or the person is outside their available hours |
+| | | spoken sentence, then busy for 2.5 s | bedtime, the button pressed has nobody set up, or the person is outside their available hours |
 | | amber fast blink | | BOOT button held: keep holding for 10 s to erase everything, let go to cancel |
 
 No lights at all means the phone is not working (no WiFi, not set up, no
@@ -148,6 +165,7 @@ again):
 | "They can't talk right now. Try again later." | That person is outside the available times set for them. | Nothing, or change their times on the setup page. |
 | "They didn't answer the phone." | The person did not pick up within 30 s, or declined the call (Twilio says it, then about 4 s of quiet, then hangs up). The phone says the same words itself if Twilio rejects the call as busy, declined or not answered (SIP 480, 486, 600, 603), or it rang for 90 s with no answer. | Nothing. |
 | "The phone isn't connected. Ask a grown-up for help." | No WiFi, or WiFi without internet (the phone could not look up or reach Twilio), or the WiFi dropped during a call. | Check the router and internet. A red blinking board light means no WiFi at all: none of the saved networks is in range or accepts the saved password (a new house, a new router, a changed password). Add the network from the setup page, or from the installer page (see "Taking the phone to another house"). |
+| "It's sleep time. You can call in the morning." | Bedtime is on and it is inside the bedtime hours (home time). | Nothing, or change bedtime on the setup page. |
 | "This phone isn't ready yet. Ask a grown-up for help." | Twilio setup has not been done, or the button pressed has nobody set up. | Open `http://kidphone.local/`, finish setup or fill in that button. |
 | "The phone can't make calls right now. Ask a grown-up to check the phone." | Twilio refused the call: login rejected (401/403/407, run setup again), SIP domain gone (404), the call was cut off by Twilio within 5 s (usually Geo permissions for that country, or a trial account calling an unverified number), or any other error (credit, account suspended). | Open the setup page: **Try it** shows the detailed reason of the last call. Then fix it in the Twilio Console or press **Run setup again**. |
 
@@ -166,8 +184,8 @@ has the call program from older phone software. Press **Run setup again**
 once (it needs the Auth Token); changing numbers alone does not update it.
 
 Contact lights: on = can be called now, off = not set up, outside their
-hours, or the phone itself cannot call (no WiFi or Twilio not set up; then
-all are off), blinking = being called.
+hours, bedtime (all off), or the phone itself cannot call (no WiFi or Twilio
+not set up; then all are off), blinking = being called.
 
 ## Hardware
 
@@ -267,6 +285,9 @@ All runtime config lives in NVS, namespace `kidphone` (`src/config_store.c`):
 | `tw_key_sid`, `tw_key_sec` | str | provisioning; restricted Twilio API key (`SK...`) and its secret, used only for number updates. A sid without a secret = a key Twilio rejected, deleted on the next token run |
 | `tw_svc`, `tw_env` | str | provisioning; Serverless service and environment SIDs the key updates |
 | `max_call_min` | u16 | `POST /api/settings`; longest call in minutes, 1..120, missing or out of range = 30 |
+| `bed_on` | u8 | `POST /api/bedtime`; 1 = bedtime on, missing = off (configs from before 0.4.0 load unchanged) |
+| `bed_start`, `bed_end` | u16 | same; bedtime window in minutes of the day, home time, missing or out of range = 1170 (19:30) / 420 (07:00) |
+| `home_tz`, `home_tz_name` | str | same; home time zone (POSIX TZ rule) and the IANA name the page picked it from (display only), missing = not set yet |
 
 Schedule blob (`sched_blob_t` in `config_store.c`, packed, little endian):
 `version` u8 (1), `enabled` u8, `nwin` u8, `tz` char[48] (POSIX TZ rule),
@@ -379,11 +400,12 @@ phone only has the station interface, so it is only reachable on the home LAN.
 | Endpoint | What |
 |---|---|
 | `GET /` | setup page |
-| `GET /api/status` | `settings` {`max_call_minutes` and its bounds}, WiFi, Twilio (provisioned, caller ID, account SID, SIP user, `login_current`, `numbers_key` = a restricted key is stored), 4 contact slots with schedule, `available`, `next` {day, time} in their time zone, `time_synced`, handset, call state and contact, last call result (`code`, `kind`, `message`), setup progress (`state`, `run`, `steps`, on failure `error`, `hint`, `needs_token`) |
+| `GET /api/status` | `settings` {`max_call_minutes` and its bounds}, `bedtime` {`enabled`, `start`, `end` ("HH:MM", home time), `tz`, `tz_name`, `scheduled` = on with a valid home time zone, `active` = asleep now}, WiFi, Twilio (provisioned, caller ID, account SID, SIP user, `login_current`, `numbers_key` = a restricted key is stored), 4 contact slots with schedule, `available`, `next` {day, time} in their time zone, `time_synced`, handset, call state and contact, last call result (`code`, `kind`, `message`), setup progress (`state`, `run`, `steps`, on failure `error`, `hint`, `needs_token`) |
 | `POST /api/contacts` | `{contacts:[{name, number, schedule:{enabled, tz, tz_name, windows:[{days, start, end}]}} x up to 4]}`; saves names, button order and schedules without a token. If the set of numbers differs from what Twilio allows and a numbers key is stored: 202 `{updating: true, run}`, the key run starts (progress in `/api/status`; if Twilio rejects the key it fails with `needs_token`). No key: 409 `{needs_token: true}` |
 | `POST /api/provision` | `{account_sid, auth_token, contacts, full}` (202 `{ok, message, run}`). Already set up with its own login, same account, `full` not true: numbers-only update. Otherwise the full setup. `account_sid` may be omitted once stored. Old `contact_name`/`contact_number` still accepted |
 | `POST /api/settings` | `{max_call_minutes}`, a whole number 1..120 (400 otherwise); no token |
-| `POST /api/call` | `{contact: i}` test call, same rules as button i (409 if outside their hours) |
+| `POST /api/bedtime` | `{enabled, start, end, tz, tz_name}`: times as "HH:MM" or minutes of the day (home time), `tz` a POSIX TZ rule. 400 if a time is missing or out of range, if on with equal times, or if `tz` does not parse (required when on). Device only, no token |
+| `POST /api/call` | `{contact: i}` test call, same rules as button i (409 if outside their hours) except bedtime, which does not apply to it (the parent testing) |
 | `POST /api/hangup` | hang up |
 | `GET /api/wifi` | `{connected, state` ("connected", "connecting", "scanning", "waiting", "no networks")`, ssid, rssi, ip, max, uptime_s, saved: [{ssid, secured, connected, in_last_scan, last_rssi, last_seen_ago_s, last_result, last_text, last_reason, last_try_ago_s}], attempts: [{ssid, rssi, result, text, reason, at_s, ago_s, improv}]}`. `attempts` = the last 8, newest first (RAM only, since boot). `result`/`last_result` is one of `connected`, `wrong_password`, `not_found`, `timeout`, `no_ip`, `dropped`, `other`; `text` is the plain-English version shown on the page; `reason` is the driver's disconnect reason (0 = none). History fields are left out when unknown: `in_last_scan` before the first scan, `last_rssi`/`last_seen_ago_s` if no scan saw it, `last_*` result fields if it was never tried, `rssi` if the scan before that attempt did not see it, `improv` unless true. The same object is `wifi` in `/api/status`. Never a password |
 | `POST /api/wifi/scan` | `{}`. Blocks a few seconds; `{networks: [{ssid, rssi, bars (1-4), secured, saved, connected}]}`, one entry per SSID (strongest access point), strongest first, hidden networks left out. The connection stays up. 409 during a call (the scan would pause the audio), 503 if the radio is busy |
@@ -510,6 +532,19 @@ A window is evaluated on a circular week of 10080 minutes, so 22:00 to 01:00
 and Saturday into Sunday wrap naturally. "Next available" is the nearest
 window start, shown in the contact's own time.
 
+### Bedtime
+
+`schedule_bedtime_eval()` in `src/schedule.c`: one window every day, in the
+home time zone (`home_tz`, the same POSIX TZ evaluation as the schedules),
+on a circular day of 1440 minutes, so 19:30 to 07:00 wraps past midnight.
+The schedule task caches it each second (`schedule_bedtime_active()`) and
+logs each change. While it is active the contact lights are all off
+(`contact_leds.c`; a call already going keeps blinking and is never hung up
+by bedtime) and an idle press plays `sleep_time` and the short busy tone
+(`on_press_idle()` in `main.c`, checked before the WiFi, setup and schedule
+checks). Not synced yet, off, or no valid home time zone: never active, so a
+clock problem never blocks a call. `POST /api/call` skips it on purpose.
+
 ### Privacy
 
 The phone talks to the parent's own Twilio account (`api.twilio.com`,
@@ -525,7 +560,7 @@ message plus a hint.
 | State | Action | Result |
 |---|---|---|
 | idle | short press button i | call contact i (needs WiFi and Twilio setup) |
-| idle | short press, slot empty or contact outside their hours | spoken prompt, then busy tone for 2.5 s, no call |
+| idle | short press, bedtime, slot empty or contact outside their hours | spoken prompt, then busy tone for 2.5 s, no call |
 | idle | short press while a prompt plays, or within 3 s (`APP_PRESS_COOLDOWN_MS`) after a call ended or failed | ignored (button mashing) |
 | calling / ringing / in call | press any button | hang up (CANCEL before answer, BYE after); the 3 s cooldown then starts |
 | in call | call reaches the call length limit (setup page, default 30 min) | BYE, then "Time's up!", then silence |
@@ -556,8 +591,8 @@ What the earpiece plays:
   zeros). With `APP_IDLE_DIAL_TONE 1` instead: no WiFi = slow quiet beep
   (480 Hz, 250 ms every 3 s), Twilio not set up = US reorder (480 + 620 Hz,
   250 ms on/off), ready = US dial tone (mode C)
-- a press that cannot call: the spoken prompt for it, then (empty slot or
-  outside their hours) US busy for 2.5 s, then silence
+- a press that cannot call: the spoken prompt for it, then (bedtime, empty
+  slot or outside their hours) US busy for 2.5 s, then silence
 - after a failed call (4xx/5xx/6xx, no response, DNS, not set up), or a call
   Twilio answered and hung up within 5 s: the spoken prompt for it (table in
   Setup), then US busy, 480 + 620 Hz, 500 ms on/off, for 5 s, then silence
@@ -594,9 +629,9 @@ at idle as above. Mode C is the only way to hear the dial tone by default.
 
 ### Spoken prompts
 
-The phone speaks six short sentences (table in Setup). They are made
+The phone speaks seven short sentences (table in Setup). They are made
 offline by `scripts/gen_prompts.py` and committed as raw 16 kHz mono 16-bit
-little-endian PCM in `src/prompts/` (about 740 KB in all, embedded with
+little-endian PCM in `src/prompts/` (about 850 KB in all, embedded with
 `EMBED_FILES` in `src/CMakeLists.txt` and `board_build.embed_files` in
 `platformio.ini`; the two lists must match). The phone never synthesizes
 speech and never fetches audio. The audio task plays a prompt through its own
@@ -881,7 +916,7 @@ writes the version into `web/manifest.json`.
 ```sh
 scripts/build_web_bin.sh                    # merge the existing build
 scripts/build_web_bin.sh --build            # pio run first, then merge
-scripts/build_web_bin.sh --version 0.3.0    # set the manifest version
+scripts/build_web_bin.sh --version 0.4.0    # set the manifest version
 ```
 
 `web/firmware/*.bin` is gitignored on purpose: the image contains whatever

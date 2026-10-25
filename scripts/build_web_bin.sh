@@ -4,7 +4,7 @@
 # Usage:
 #   scripts/build_web_bin.sh            # merge the existing .pio build artifacts
 #   scripts/build_web_bin.sh --build    # run `pio run` first, then merge
-#   scripts/build_web_bin.sh --version 0.3.0   # override the manifest version
+#   scripts/build_web_bin.sh --version 0.4.0   # override the manifest version
 #
 # Output: web/firmware/kid_phone.bin (flashed at offset 0) and the version
 # field of web/manifest.json updated in place.

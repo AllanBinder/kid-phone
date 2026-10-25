@@ -148,6 +148,19 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     <p class="hint" id="maxmin-msg"></p>
   </section>
 
+  <section class="card" id="c-bed">
+    <h2>Bedtime</h2>
+    <p id="bed-status"></p>
+    <label class="toggle"><input type="checkbox" id="bed-on"> Put the phone to sleep at night</label>
+    <p class="hint">During bedtime every light is off, even for people who are available, and pressing a button says "It's sleep time. You can call in the morning." instead of calling. A call that is already going is not cut off. Your Call buttons on this page still work.</p>
+    <div class="times">Lights off at <input id="bed-start" type="time" required> back on at <input id="bed-end" type="time" required> <span class="small" id="bed-wrap"></span></div>
+    <label for="bed-zone">Home time zone (where the phone is)</label>
+    <div id="bed-zone-box"></div>
+    <p class="hint">Bedtime follows the clock at home, not the time zones of the people on the buttons.</p>
+    <button type="button" id="b-bed">Save</button>
+    <p class="hint" id="bed-msg"></p>
+  </section>
+
   <section class="card hidden" id="c-tw">
     <h2 id="tw-title">Connect to Twilio</h2>
     <div id="tw-intro">
@@ -216,7 +229,7 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     <details id="adv">
       <summary>Advanced</summary>
       <h3>Factory reset</h3>
-      <p>Erases everything on the phone: the WiFi, the Twilio connection, the people on each button, their times and the call length. Nothing in your Twilio account is deleted.</p>
+      <p>Erases everything on the phone: the WiFi, the Twilio connection, the people on each button, their times, the call length and bedtime. Nothing in your Twilio account is deleted.</p>
       <p>Afterwards the phone is off every saved WiFi network, so this page stops working. Set it up again from the start: plug its COM port into a computer and open the installer page.</p>
       <label for="reset-word">Type RESET to confirm</label>
       <input id="reset-word" autocomplete="off" spellcheck="false" autocapitalize="characters" style="max-width: 200px">
@@ -348,6 +361,7 @@ let pendingContacts = null; /* contacts waiting for the Auth Token ("numbers" mo
  * form is never reloaded over the edits. */
 let pendingRun = null;
 let mmDirty = false; /* call length edited, not saved yet */
+let bedDirty = false, bedSig = null; /* bedtime edited, not saved yet / what the form was loaded from */
 let resetting = false; /* factory reset sent: stop polling, the phone is going away */
 
 function browserZone() {
@@ -617,6 +631,7 @@ function trackSave(s, running) {
 
 function availText(c) {
   if (!c.number) return ["Not used", false];
+  if (st.bedtime && st.bedtime.active) return ["Bedtime (light off until " + st.bedtime.end + ")", false];
   if (!st.time_synced && c.scheduled) return ["Available (clock not synced yet)", true];
   if (!c.scheduled) return ["Always available", true];
   if (c.available) return ["Available now", true];
@@ -642,6 +657,7 @@ function render() {
   const mm = $("maxmin");
   if (set.max_call_minutes && document.activeElement !== mm && !mmDirty) mm.value = set.max_call_minutes;
   if (set.max_call_minutes_lo) { mm.min = set.max_call_minutes_lo; mm.max = set.max_call_minutes_hi; }
+  renderBedtime();
 
   const s = st.setup, running = s.state === "running";
   if (formSig !== null) trackSave(s, running);
@@ -1025,6 +1041,60 @@ $("b-maxmin").addEventListener("click", async () => {
   $("b-maxmin").disabled = false;
   $("maxmin-msg").textContent = r.ok ? "Saved." : (r.j.error || "Could not save. Try again.");
   if (r.ok) { mmDirty = false; kick(); }
+});
+
+/* ---------- bedtime ---------- */
+
+function bedWrapNote() {
+  const s = mins($("bed-start").value), e = mins($("bed-end").value);
+  $("bed-wrap").textContent = e < s ? "(the next morning)" : "";
+}
+
+/* Fill the form from what the phone has saved. No home time zone saved yet:
+ * the picker starts on this browser's own zone. */
+function loadBed(b) {
+  $("bed-on").checked = !!b.enabled;
+  $("bed-start").value = b.start || "19:30";
+  $("bed-end").value = b.end || "07:00";
+  const zs = zoneSelect({tz: b.tz || "", tz_name: b.tz_name || ""});
+  zs.id = "bed-zone";
+  zs.addEventListener("change", () => { bedDirty = true; $("bed-msg").textContent = ""; });
+  $("bed-zone-box").replaceChildren(zs);
+  bedWrapNote();
+  bedDirty = false;
+}
+
+function renderBedtime() {
+  const b = st.bedtime;
+  if (!b) return;
+  const sig = JSON.stringify([b.enabled, b.start, b.end, b.tz, b.tz_name]);
+  if (sig !== bedSig && !bedDirty) { loadBed(b); bedSig = sig; }
+  let text, cls = "";
+  if (!b.enabled) text = "Off. The lights follow each person's own times all night.";
+  else if (!b.scheduled) { text = "Pick the home time zone and press Save."; cls = "bad"; }
+  else if (!st.time_synced) { text = "Waiting for the clock to sync. Until then bedtime is not applied and calls are allowed."; cls = "bad"; }
+  else if (b.active) { text = "Asleep now, lights back on at " + b.end + "."; cls = "good"; }
+  else text = "Lights go off at " + b.start + ".";
+  setText("bed-status", text, cls);
+}
+
+["bed-on", "bed-start", "bed-end"].forEach((id) => $(id).addEventListener("input", () => {
+  bedDirty = true; $("bed-msg").textContent = ""; bedWrapNote();
+}));
+$("bed-on").addEventListener("change", () => { bedDirty = true; $("bed-msg").textContent = ""; });
+$("b-bed").addEventListener("click", async () => {
+  const start = $("bed-start").value, end = $("bed-end").value, on = $("bed-on").checked;
+  const opt = $("bed-zone") && $("bed-zone").selectedOptions[0];
+  if (!start || !end) { $("bed-msg").textContent = "Fill in both times."; return; }
+  if (on && start === end) { $("bed-msg").textContent = "The two times must be different."; return; }
+  $("b-bed").disabled = true;
+  let r;
+  try {
+    r = await api("/api/bedtime", {enabled: on, start, end, tz: opt ? opt.dataset.tz : "", tz_name: opt ? opt.dataset.name : ""});
+  } catch (e) { r = {ok: false, j: {}}; }
+  $("b-bed").disabled = false;
+  $("bed-msg").textContent = r.ok ? "Saved." : (r.j.error || "Could not save. Try again.");
+  if (r.ok) { bedDirty = false; bedSig = null; kick(); }
 });
 
 $("b-tw-cancel").addEventListener("click", () => {

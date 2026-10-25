@@ -23,6 +23,7 @@ static const char *TAG = "schedule";
 
 static _Atomic bool s_synced;
 static _Atomic uint32_t s_avail_mask = 0xff; /* bit i = contact i available */
+static _Atomic bool s_bedtime;               /* asleep now */
 
 static void on_sync(struct timeval *tv)
 {
@@ -43,6 +44,11 @@ bool schedule_available(int idx)
         return false;
     }
     return (atomic_load(&s_avail_mask) >> idx) & 1;
+}
+
+bool schedule_bedtime_active(void)
+{
+    return atomic_load(&s_bedtime);
 }
 
 static int window_minutes(const cfg_window_t *w)
@@ -120,6 +126,39 @@ void schedule_eval(const cfg_schedule_t *s, sched_state_t *out)
     }
 }
 
+const char *schedule_bedtime_validate(const cfg_bedtime_t *b)
+{
+    if (b->start_min >= 1440 || b->end_min >= 1440) {
+        return "times must be between 00:00 and 23:59";
+    }
+    if (b->enabled && b->start_min == b->end_min) {
+        return "the start and end times must be different";
+    }
+    tz_posix_t tz;
+    if ((b->enabled || b->tz[0]) && !tz_posix_parse(b->tz, &tz)) {
+        return "pick the home time zone";
+    }
+    return NULL;
+}
+
+void schedule_bedtime_eval(const cfg_bedtime_t *b, bedtime_state_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    tz_posix_t tz;
+    if (!b->enabled || b->start_min == b->end_min || !tz_posix_parse(b->tz, &tz)) {
+        return; /* bedtime off (or unusable): never asleep */
+    }
+    out->scheduled = true;
+    if (!schedule_time_synced()) {
+        return; /* never block a call because of clock trouble */
+    }
+    int wday, mod;
+    tz_posix_local(&tz, (int64_t)time(NULL), &wday, &mod);
+    /* Minutes since bedtime started, on a circular day (wraps past midnight). */
+    const int dur = ((int)b->end_min - (int)b->start_min + 1440) % 1440;
+    out->active = (mod - (int)b->start_min + 1440) % 1440 < dur;
+}
+
 static void start_sntp(void)
 {
     esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(
@@ -157,12 +196,19 @@ static void sched_task(void *arg)
                 mask |= 1u << i;
             }
         }
+        bedtime_state_t bt;
+        schedule_bedtime_eval(&cfg->bedtime, &bt);
+        any_scheduled |= bt.scheduled;
         config_wipe(cfg); /* it held the SIP password */
         atomic_store(&s_avail_mask, mask);
+        if (atomic_exchange(&s_bedtime, bt.active) != bt.active) {
+            ESP_LOGI(TAG, "%s", bt.active ? "bedtime: lights off, presses say it's sleep time"
+                                          : "bedtime over: lights follow each contact's hours again");
+        }
 
         const bool synced = schedule_time_synced();
         if (any_scheduled && !synced && !warned_unsynced) {
-            ESP_LOGW(TAG, "clock not synced yet: every contact counts as available until it is");
+            ESP_LOGW(TAG, "clock not synced yet: every contact counts as available (and bedtime is off) until it is");
             warned_unsynced = true;
         } else if (synced) {
             warned_unsynced = false;

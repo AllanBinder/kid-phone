@@ -152,7 +152,7 @@
  * and receive. The server is SIP_DOMAIN (secrets.h) on APP_SIP_SERVER_PORT. */
 #define APP_SIP_LOCAL_PORT      5060
 #define APP_SIP_SERVER_PORT     5060
-#define APP_SIP_USER_AGENT      "kid_phone/0.3"
+#define APP_SIP_USER_AGENT      "kid_phone/0.4"
 
 /* RFC 3261 timers. T1 = first retransmit interval, doubling each time;
  * non-INVITE retransmits cap at T2; transactions give up after 64*T1. */
@@ -169,6 +169,13 @@
 #define APP_CALL_MAX_MIN_DEFAULT 30
 #define APP_CALL_MAX_MIN_LO     1
 #define APP_CALL_MAX_MIN_HI     120
+
+/* Bedtime (parent sets it on the setup page, off by default): one nightly
+ * window in the home time zone when the lights are off and a press says
+ * "It's sleep time" instead of calling. These are the times the page offers
+ * before the parent changes them. */
+#define APP_BEDTIME_START_DEFAULT (19 * 60 + 30)
+#define APP_BEDTIME_END_DEFAULT   (7 * 60)
 
 /* During a call, send a CRLF keepalive to the SIP server this often so the
  * home NAT keeps the SIP mapping open for the remote BYE. */

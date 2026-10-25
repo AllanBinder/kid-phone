@@ -7,8 +7,8 @@
  * phone's own web page (http://kidphone.local/). Up to four contact buttons
  * (APP_BUTTON_GPIOS) with one LED each (APP_CONTACT_LED_GPIOS):
  *   idle, press i             call contact i (a spoken prompt, then a short
- *                             busy tone, if the slot is empty or the contact
- *                             is outside their available hours)
+ *                             busy tone, if it is bedtime, the slot is empty
+ *                             or the contact is outside their available hours)
  *   in a call, press any      hang up (CANCEL while ringing, BYE when answered)
  *   while a prompt plays, and APP_PRESS_COOLDOWN_MS after a call ends or
  *   fails, presses are ignored (button mashing)
@@ -203,6 +203,17 @@ static void on_press_idle(int idx)
     }
     if (now_ms() < atomic_load(&s_cooldown_until_ms)) {
         ESP_LOGI(TAG, "BUTTON %d: ignored, cooldown after the last call", idx);
+        return;
+    }
+    /* Bedtime first: whatever else is wrong, the child only needs to hear
+     * that it is sleep time. Off until the clock has synced. */
+    cfg_bedtime_t bed;
+    bedtime_state_t bst;
+    config_get_bedtime(&bed);
+    schedule_bedtime_eval(&bed, &bst);
+    if (bst.active) {
+        ESP_LOGI(TAG, "BUTTON %d: bedtime, busy tone", idx);
+        feedback(PROMPT_SLEEP_TIME, APP_SHORT_BUSY_MS);
         return;
     }
     if (!wifi_is_connected()) {

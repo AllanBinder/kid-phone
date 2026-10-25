@@ -23,6 +23,11 @@
  *   tw_prog                    u8, APP_TW_PROGRAM_VERSION of the call program the last
  *                              full setup deployed (missing = 0, older firmware)
  *   max_call_min               u16, longest call in minutes (missing = APP_CALL_MAX_MIN_DEFAULT)
+ *   bed_on                     u8, 1 = bedtime on (missing = off, so older configs load unchanged)
+ *   bed_start, bed_end         u16, bedtime window in minutes of the day, home time
+ *                              (missing = APP_BEDTIME_START_DEFAULT / APP_BEDTIME_END_DEFAULT)
+ *   home_tz, home_tz_name      the home time zone (where the child is): POSIX TZ rule and the
+ *                              IANA name the page picked it from (missing = not set yet)
  *
  * The Twilio Auth Token is never stored. An optional src/secrets.h (developer
  * override) seeds empty NVS at boot so a bench board keeps working.
@@ -71,6 +76,18 @@ typedef struct {
     cfg_window_t win[CFG_MAX_WINDOWS];
 } cfg_schedule_t;
 
+/* Bedtime: one nightly window in the home time zone, every day. Inside it
+ * the lights are off and a press says it is sleep time instead of calling.
+ * end_min < start_min wraps past midnight (19:30-07:00); start_min ==
+ * end_min is refused (schedule_bedtime_validate). */
+typedef struct {
+    bool enabled;       /* false (default): no bedtime */
+    uint16_t start_min; /* 0..1439, home time */
+    uint16_t end_min;   /* 0..1439, home time */
+    char tz[48];        /* home time zone, POSIX TZ rule; "" = not set yet */
+    char tz_name[40];   /* IANA name the page picked it from, for display only */
+} cfg_bedtime_t;
+
 typedef struct {
     char name[32];
     char number[20]; /* E.164, "+" and up to 15 digits; "" = unused slot */
@@ -93,6 +110,7 @@ typedef struct {
     char env_sid[40];
     uint8_t call_program;  /* tw_prog: APP_TW_PROGRAM_VERSION last deployed, 0 = unknown */
     uint16_t max_call_min; /* APP_CALL_MAX_MIN_LO..APP_CALL_MAX_MIN_HI */
+    cfg_bedtime_t bedtime;
 } app_cfg_t;
 
 /* Init NVS flash, load the namespace, seed from secrets.h if present and
@@ -171,8 +189,14 @@ bool config_has_twilio_key(void);
 uint16_t config_max_call_minutes(void);
 esp_err_t config_set_max_call_minutes(unsigned minutes);
 
+/* Bedtime and the home time zone, and saving them (device only, no Twilio).
+ * The caller validates first (schedule_bedtime_validate). */
+void config_get_bedtime(cfg_bedtime_t *out);
+esp_err_t config_set_bedtime(const cfg_bedtime_t *b);
+
 /* True if at least one contact slot has a number. */
 bool config_any_contact(const cfg_contact_t *contacts);
 
-/* Erase the whole namespace (all WiFi networks, Twilio, Twilio key, contacts, call length). Caller reboots. */
+/* Erase the whole namespace (all WiFi networks, Twilio, Twilio key, contacts, call length, bedtime).
+ * Caller reboots. */
 esp_err_t config_factory_reset(void);

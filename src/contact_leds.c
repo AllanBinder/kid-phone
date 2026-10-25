@@ -27,6 +27,9 @@ static void leds_task(void *arg)
         /* No WiFi or not set up: the phone cannot call anyone, so every light
          * is off (a press then says why). */
         const bool can_call = wifi_is_connected() && config_is_provisioned();
+        /* Bedtime: every light off, whatever each contact's own hours say.
+         * A call already going keeps blinking (it is not cut off). */
+        const bool asleep = schedule_bedtime_active();
         for (int i = 0; i < APP_NUM_BUTTONS && i < CFG_MAX_CONTACTS; i++) {
             cfg_contact_t c;
             bool has = config_get_contact(i, &c);
@@ -34,7 +37,7 @@ static void leds_task(void *arg)
             if (i == calling) {
                 on = blink_on;
             } else {
-                on = can_call && has && schedule_available(i);
+                on = can_call && !asleep && has && schedule_available(i);
             }
             gpio_set_level(k_led_gpio[i], on ? 1 : 0);
         }

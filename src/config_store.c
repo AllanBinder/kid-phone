@@ -140,6 +140,8 @@ static void load(void)
     mbedtls_platform_zeroize(s_wifi, sizeof(s_wifi));
     s_nwifi = 0;
     s_cfg.max_call_min = APP_CALL_MAX_MIN_DEFAULT;
+    s_cfg.bedtime.start_min = APP_BEDTIME_START_DEFAULT;
+    s_cfg.bedtime.end_min = APP_BEDTIME_END_DEFAULT;
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) {
         return; /* namespace does not exist yet: empty config */
@@ -182,6 +184,19 @@ static void load(void)
     if (nvs_get_u16(h, "max_call_min", &mc) == ESP_OK && mc >= APP_CALL_MAX_MIN_LO && mc <= APP_CALL_MAX_MIN_HI) {
         s_cfg.max_call_min = mc;
     }
+    /* Bedtime: every key optional (firmware before 0.4.0 wrote none). */
+    uint8_t bon = 0;
+    nvs_get_u8(h, "bed_on", &bon);
+    s_cfg.bedtime.enabled = bon == 1;
+    uint16_t bm = 0;
+    if (nvs_get_u16(h, "bed_start", &bm) == ESP_OK && bm < 1440) {
+        s_cfg.bedtime.start_min = bm;
+    }
+    if (nvs_get_u16(h, "bed_end", &bm) == ESP_OK && bm < 1440) {
+        s_cfg.bedtime.end_min = bm;
+    }
+    get_str(h, "home_tz", s_cfg.bedtime.tz, sizeof(s_cfg.bedtime.tz));
+    get_str(h, "home_tz_name", s_cfg.bedtime.tz_name, sizeof(s_cfg.bedtime.tz_name));
     uint8_t p = 0;
     nvs_get_u8(h, "provisioned", &p);
     /* Only trust the flag if the SIP account and a contact are really there. */
@@ -479,6 +494,13 @@ void config_store_init(void)
                      s_cfg.contacts[i].sched.enabled ? "on" : "off (always available)");
         }
     }
+    if (s_cfg.bedtime.enabled) {
+        ESP_LOGI(TAG, "bedtime: %02u:%02u to %02u:%02u, home time zone \"%s\"", s_cfg.bedtime.start_min / 60u,
+                 s_cfg.bedtime.start_min % 60u, s_cfg.bedtime.end_min / 60u, s_cfg.bedtime.end_min % 60u,
+                 s_cfg.bedtime.tz);
+    } else {
+        ESP_LOGI(TAG, "bedtime: off");
+    }
 }
 
 void config_get(app_cfg_t *out)
@@ -709,6 +731,48 @@ esp_err_t config_set_max_call_minutes(unsigned minutes)
     return err;
 }
 
+void config_get_bedtime(cfg_bedtime_t *out)
+{
+    lock();
+    *out = s_cfg.bedtime;
+    unlock();
+}
+
+esp_err_t config_set_bedtime(const cfg_bedtime_t *b)
+{
+    if (b->start_min >= 1440 || b->end_min >= 1440) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    cfg_bedtime_t nb = {.enabled = b->enabled, .start_min = b->start_min, .end_min = b->end_min};
+    copy_str(nb.tz, sizeof(nb.tz), b->tz);
+    copy_str(nb.tz_name, sizeof(nb.tz_name), b->tz_name);
+    lock();
+    err |= nvs_set_u8(h, "bed_on", nb.enabled ? 1 : 0);
+    err |= nvs_set_u16(h, "bed_start", nb.start_min);
+    err |= nvs_set_u16(h, "bed_end", nb.end_min);
+    err |= put_str(h, "home_tz", nb.tz);
+    err |= put_str(h, "home_tz_name", nb.tz_name);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    if (err == ESP_OK) {
+        s_cfg.bedtime = nb;
+    }
+    s_gen++;
+    unlock();
+    nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "saving bedtime failed: %s", esp_err_to_name(err));
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
 bool config_has_twilio_key(void)
 {
     lock();
@@ -733,6 +797,8 @@ esp_err_t config_factory_reset(void)
     mbedtls_platform_zeroize(s_wifi, sizeof(s_wifi));
     s_nwifi = 0;
     s_cfg.max_call_min = APP_CALL_MAX_MIN_DEFAULT;
+    s_cfg.bedtime.start_min = APP_BEDTIME_START_DEFAULT;
+    s_cfg.bedtime.end_min = APP_BEDTIME_END_DEFAULT;
     s_gen++;
     unlock();
     ESP_LOGW(TAG, "factory reset: config erased (%s)", esp_err_to_name(err));
