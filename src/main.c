@@ -555,6 +555,8 @@ void app_main(void)
              APP_BOOT_GPIO, APP_FACTORY_RESET_MS);
 
     config_store_init();
+    /* Prompt language before anything can speak or call (sip.c sends it). */
+    prompt_set_lang((prompt_lang_t)config_lang());
     /* Buttons and lights as saved (or the default wiring), before any task
      * reads them. Later changes are applied by the button task. */
     cfg_pins_t pins;

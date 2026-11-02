@@ -14,10 +14,12 @@
  *      another list mapped on the domain holds the same username (Twilio may
  *      then check the wrong password and answer 403).
  *   5. Serverless service "kid-phone", environment "prod", function "voice"
- *      and asset "no-answer": upload twilio/voice.js (embedded at build time)
- *      as /voice (protected) and twilio/no_answer.wav as /no-answer.wav
- *      (public, the "They didn't answer the phone." clip voice.js plays),
- *      build both into one build, wait for it, set CALLER_ID and ALLOWED,
+ *      and assets "no-answer", "no-answer-ca", "no-answer-es": upload
+ *      twilio/voice.js (embedded at build time) as /voice (protected) and
+ *      twilio/no_answer*.wav as /no-answer.wav, /no-answer-ca.wav,
+ *      /no-answer-es.wav (public, the "They didn't answer the phone." clip
+ *      voice.js plays, in the language the phone's INVITE names), build
+ *      them all into one build, wait for it, set CALLER_ID and ALLOWED,
  *      deploy, record APP_TW_PROGRAM_VERSION in NVS
  *   6. SIP domain VoiceUrl = https://<environment domain>/voice
  *   7. Save SIP domain/user/password, caller ID and contacts to NVS
@@ -99,9 +101,29 @@ static const char *TAG = "provision";
 /* twilio/voice.js, embedded by src/CMakeLists.txt (EMBED_TXTFILES adds a NUL). */
 extern const char voice_js_start[] asm("_binary_voice_js_start");
 extern const char voice_js_end[] asm("_binary_voice_js_end");
-/* twilio/no_answer.wav (8 kHz mu-law, scripts/gen_prompts.py), EMBED_FILES (no NUL). */
-extern const char no_answer_wav_start[] asm("_binary_no_answer_wav_start");
-extern const char no_answer_wav_end[] asm("_binary_no_answer_wav_end");
+/* twilio/no_answer*.wav (8 kHz mu-law, scripts/gen_prompts.py), EMBED_FILES (no NUL). */
+#define WAV(name)                                                         \
+    extern const char name##_wav_start[] asm("_binary_" #name "_wav_start"); \
+    extern const char name##_wav_end[] asm("_binary_" #name "_wav_end");
+WAV(no_answer)
+WAV(no_answer_ca)
+WAV(no_answer_es)
+
+/* The no-answer clip per prompt language: Serverless Asset friendly name,
+ * public path (NO_ANSWER_ASSET in twilio/voice.js), upload file name, data.
+ * Uploaded one at a time (each upload_version buffer is the clip + 1 KB). */
+typedef struct {
+    const char *name, *path, *file;
+    const char *start, *end;
+} tw_asset_t;
+static const tw_asset_t k_assets[] = {
+    {APP_TW_ASSET_NAME, "/" APP_TW_ASSET_NAME ".wav", "no_answer.wav", no_answer_wav_start, no_answer_wav_end},
+    {APP_TW_ASSET_NAME "-ca", "/" APP_TW_ASSET_NAME "-ca.wav", "no_answer_ca.wav", no_answer_ca_wav_start,
+     no_answer_ca_wav_end},
+    {APP_TW_ASSET_NAME "-es", "/" APP_TW_ASSET_NAME "-es.wav", "no_answer_es.wav", no_answer_es_wav_start,
+     no_answer_es_wav_end},
+};
+#define N_ASSETS (sizeof(k_assets) / sizeof(k_assets[0]))
 
 /* ---------------------------------------------------------------------------
  * Progress (read by the web server)
@@ -194,8 +216,8 @@ typedef struct {
     char env_domain[128];
     char fn_sid[40];
     char fnv_sid[40];
-    char asset_sid[40];
-    char assetv_sid[40];
+    char asset_sid[N_ASSETS][40];
+    char assetv_sid[N_ASSETS][40];
     char build_sid[40];
     char other_lists[4][40];   /* other credential lists mapped on the domain */
     int n_other_lists;
@@ -848,12 +870,12 @@ static bool upload_function(prov_t *p)
 
 /* Public: Twilio's <Play> fetches it without a signature. It is only the
  * spoken sentence, nothing about the family. */
-static bool upload_asset(prov_t *p)
+static bool upload_asset(prov_t *p, size_t i)
 {
-    snprintf(p->url, sizeof(p->url), SLS_UP "/%s/Assets/%s/Versions", p->svc_sid, p->asset_sid);
-    return upload_version(p, p->url, APP_TW_ASSET_PATH, "public", "no_answer.wav", "audio/wav", no_answer_wav_start,
-                          (size_t)(no_answer_wav_end - no_answer_wav_start), p->assetv_sid, sizeof(p->assetv_sid),
-                          "Uploading the phone's voice");
+    const tw_asset_t *a = &k_assets[i];
+    snprintf(p->url, sizeof(p->url), SLS_UP "/%s/Assets/%s/Versions", p->svc_sid, p->asset_sid[i]);
+    return upload_version(p, p->url, a->path, "public", a->file, "audio/wav", a->start, (size_t)(a->end - a->start),
+                          p->assetv_sid[i], sizeof(p->assetv_sid[i]), "Uploading the phone's voice");
 }
 
 /* Find key == name in the list at url, else create it with form (at most
@@ -974,22 +996,31 @@ static bool step_serverless(prov_t *p)
         return it ? fail(p, "Twilio returned an incomplete function.", "Press Connect again to retry.") : false;
     }
 
-    form[0] = '\0';
-    form_add(form, sizeof(form), "FriendlyName", APP_TW_ASSET_NAME);
     snprintf(url, sizeof(url), SLS "/%s/Assets", p->svc_sid);
-    it = find_or_create(p, url, "friendly_name", APP_TW_ASSET_NAME, form, "Creating the voice clip");
-    if (!it || !copy_field(it, "sid", p->asset_sid, sizeof(p->asset_sid))) {
-        return it ? fail(p, "Twilio returned an incomplete voice clip.", "Press Connect again to retry.") : false;
+    for (size_t i = 0; i < N_ASSETS; i++) {
+        form[0] = '\0';
+        form_add(form, sizeof(form), "FriendlyName", k_assets[i].name);
+        it = find_or_create(p, url, "friendly_name", k_assets[i].name, form, "Creating the voice clip");
+        if (!it || !copy_field(it, "sid", p->asset_sid[i], sizeof(p->asset_sid[i]))) {
+            return it ? fail(p, "Twilio returned an incomplete voice clip.", "Press Connect again to retry.") : false;
+        }
     }
 
-    if (!upload_function(p) || !upload_asset(p)) {
+    if (!upload_function(p)) {
         return false;
+    }
+    for (size_t i = 0; i < N_ASSETS; i++) {
+        if (!upload_asset(p, i)) {
+            return false;
+        }
     }
 
     step("Building the call program (this can take a minute)...");
     p->body[0] = '\0';
     form_add(p->body, sizeof(p->body), "FunctionVersions", p->fnv_sid);
-    form_add(p->body, sizeof(p->body), "AssetVersions", p->assetv_sid);
+    for (size_t i = 0; i < N_ASSETS; i++) {
+        form_add(p->body, sizeof(p->body), "AssetVersions", p->assetv_sid[i]);
+    }
     form_add(p->body, sizeof(p->body), "Dependencies", APP_PROV_FN_DEPS);
     snprintf(p->url, sizeof(p->url), SLS "/%s/Builds", p->svc_sid);
     if (!post_form(p, p->url, p->body) || !copy_field(p->json, "sid", p->build_sid, sizeof(p->build_sid))) {

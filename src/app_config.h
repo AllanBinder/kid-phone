@@ -176,7 +176,7 @@
  * and receive. The server is SIP_DOMAIN (secrets.h) on APP_SIP_SERVER_PORT. */
 #define APP_SIP_LOCAL_PORT      5060
 #define APP_SIP_SERVER_PORT     5060
-#define APP_SIP_USER_AGENT      "kid_phone/0.6"
+#define APP_SIP_USER_AGENT      "kid_phone/0.7"
 
 /* RFC 3261 timers. T1 = first retransmit interval, doubling each time;
  * non-INVITE retransmits cap at T2; transactions give up after 64*T1. */
@@ -276,18 +276,25 @@
 #define APP_TW_LEGACY_SIP_USER  "handset1"
 #define APP_TW_ENV_NAME         "prod"
 #define APP_TW_FN_NAME          "voice"
-/* Serverless Asset with the "They didn't answer the phone." clip
- * (twilio/no_answer.wav), public at https://<env domain>/no-answer.wav. The
- * path must match NO_ANSWER_ASSET in twilio/voice.js. */
+/* Serverless Assets with the "They didn't answer the phone." clip, one per
+ * prompt language: twilio/no_answer.wav as "no-answer", public at
+ * https://<env domain>/no-answer.wav, and twilio/no_answer_<lang>.wav as
+ * "no-answer-<lang>" at /no-answer-<lang>.wav. The paths must match
+ * NO_ANSWER_ASSET in twilio/voice.js. */
 #define APP_TW_ASSET_NAME       "no-answer"
-#define APP_TW_ASSET_PATH       "/no-answer.wav"
+/* SIP header with the prompt language ("en", "ca", "es") on every INVITE.
+ * Twilio hands X- headers to the Function as event["SipHeader_<name>"]; must
+ * match LANG_HEADER in twilio/voice.js. */
+#define APP_SIP_LANG_HEADER     "X-Kidphone-Lang"
 /* What a full setup installs in Twilio (voice.js and its assets). Bump it
  * whenever twilio/voice.js or an asset changes: a phone whose stored value
  * (NVS tw_prog, 0 = set up before this marker existed) is lower shows "Run
  * setup again" on the setup page. Numbers-only updates redeploy the build
  * that is live and do not change it.
- *   2  (2026-10-18): Dial action, spoken "They didn't answer the phone." */
-#define APP_TW_PROGRAM_VERSION  2
+ *   2  (2026-10-18): Dial action, spoken "They didn't answer the phone."
+ *   3  (2026-11-02, 0.7.0): no-answer clip and say() lines in the phone's
+ *      language (X-Kidphone-Lang header, no-answer-ca / no-answer-es assets) */
+#define APP_TW_PROGRAM_VERSION  3
 
 /* ---------------------------------------------------------------------------
  * Secret messages: a recording from the handset mic, emailed by the phone

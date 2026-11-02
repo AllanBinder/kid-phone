@@ -45,6 +45,8 @@
  *   sec_max_s                  u16, longest secret in seconds (missing = APP_SECRET_MAX_S_DEFAULT)
  *   sec_cap_hr                 u8, secrets allowed per hour (missing = APP_SECRET_CAP_DEFAULT)
  *   sec_bed                    u8, 1 = secrets allowed at bedtime (missing = no)
+ *   lang                       u8, language of the spoken prompts (prompt_lang_t: 1 = Catalan,
+ *                              2 = Spanish); missing = English (0 is erased, not written)
  * Every secret key is optional: a phone set up before 0.6.0 has none, and
  * missing keys mean the feature is off. Empty values are erased, not written
  * (24 slots of empty keys would fill the small NVS partition).
@@ -175,6 +177,7 @@ typedef struct {
     cfg_bedtime_t bedtime;
     cfg_pins_t pins;
     cfg_secret_t secret;
+    uint8_t lang;          /* prompt_lang_t, PROMPT_LANG_EN if missing or unknown */
 } app_cfg_t;
 
 /* Init NVS flash, load the namespace, seed from secrets.h if present and
@@ -253,6 +256,12 @@ bool config_has_twilio_key(void);
  * APP_CALL_MAX_MIN_LO..APP_CALL_MAX_MIN_HI). */
 uint16_t config_max_call_minutes(void);
 esp_err_t config_set_max_call_minutes(unsigned minutes);
+
+/* Language of the spoken prompts (prompt_lang_t), and setting it
+ * (ESP_ERR_INVALID_ARG if out of range). The caller also hands it to
+ * prompt_set_lang(). */
+uint8_t config_lang(void);
+esp_err_t config_set_lang(uint8_t lang);
 
 /* Bedtime and the home time zone, and saving them (device only, no Twilio).
  * The caller validates first (schedule_bedtime_validate). */

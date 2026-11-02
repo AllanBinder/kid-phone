@@ -16,6 +16,7 @@
 #include "config_store.h"
 #include "modes.h"
 #include "pins.h"
+#include "prompts.h"
 #include "schedule.h"
 #include "secret.h"
 #include "sip.h"
@@ -352,6 +353,7 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(set, "max_call_minutes", c->max_call_min);
     cJSON_AddNumberToObject(set, "max_call_minutes_lo", APP_CALL_MAX_MIN_LO);
     cJSON_AddNumberToObject(set, "max_call_minutes_hi", APP_CALL_MAX_MIN_HI);
+    cJSON_AddStringToObject(set, "lang", prompt_lang_code((prompt_lang_t)c->lang));
     bedtime_json(cJSON_AddObjectToObject(o, "bedtime"), &c->bedtime);
     pins_json(cJSON_AddObjectToObject(o, "pins"), &c->pins);
     secret_json(cJSON_AddObjectToObject(o, "secret"), &c->secret);
@@ -802,7 +804,9 @@ static esp_err_t h_contacts(httpd_req_t *req)
     return send_msg(req, "200 OK", true, "Saved.");
 }
 
-/* POST /api/settings {max_call_minutes}: phone-only settings, no Twilio. */
+/* POST /api/settings {max_call_minutes, lang}: phone-only settings, no
+ * Twilio. Either field may be left out; both are checked before either is
+ * saved. */
 static esp_err_t h_settings(httpd_req_t *req)
 {
     if (!post_ok(req)) {
@@ -813,19 +817,55 @@ static esp_err_t h_settings(httpd_req_t *req)
         return send_msg(req, "400 Bad Request", false, "Missing, too large or bad request.");
     }
     const cJSON *v = cJSON_GetObjectItem(j, "max_call_minutes");
+    const cJSON *l = cJSON_GetObjectItem(j, "lang");
     bool num = cJSON_IsNumber(v);
     double m = num ? v->valuedouble : 0;
+    prompt_lang_t lang = cJSON_IsString(l) ? prompt_lang_from_code(l->valuestring) : PROMPT_LANG_COUNT;
     cJSON_Delete(j);
-    if (!num || m != (double)(int)m || m < APP_CALL_MAX_MIN_LO || m > APP_CALL_MAX_MIN_HI) {
+    if (!v && !l) {
+        return send_msg(req, "400 Bad Request", false, "Nothing to save.");
+    }
+    if (v && (!num || m != (double)(int)m || m < APP_CALL_MAX_MIN_LO || m > APP_CALL_MAX_MIN_HI)) {
         char e[80];
         snprintf(e, sizeof(e), "Pick a call length from %d to %d minutes.", APP_CALL_MAX_MIN_LO, APP_CALL_MAX_MIN_HI);
         return send_msg(req, "400 Bad Request", false, e);
     }
-    if (config_set_max_call_minutes((unsigned)m) != ESP_OK) {
-        return send_msg(req, "500 Internal Server Error", false, "Could not save. Try again.");
+    if (l && lang == PROMPT_LANG_COUNT) {
+        return send_msg(req, "400 Bad Request", false, "Pick English, Catalan or Spanish.");
     }
-    ESP_LOGI(TAG, "max call length set to %d min from the web page", (int)m);
+    if (v) {
+        if (config_set_max_call_minutes((unsigned)m) != ESP_OK) {
+            return send_msg(req, "500 Internal Server Error", false, "Could not save. Try again.");
+        }
+        ESP_LOGI(TAG, "max call length set to %d min from the web page", (int)m);
+    }
+    if (l) {
+        if (config_set_lang((uint8_t)lang) != ESP_OK) {
+            return send_msg(req, "500 Internal Server Error", false, "Could not save. Try again.");
+        }
+        prompt_set_lang(lang);
+        ESP_LOGI(TAG, "prompt language set to %s from the web page", prompt_lang_code(lang));
+    }
     return send_msg(req, "200 OK", true, "Saved.");
+}
+
+/* POST /api/prompt/sample {}: play one prompt ("They didn't answer the
+ * phone.") on the handset in the saved language. Only while idle with the
+ * handset plugged in: a prompt would end a secret recording's audio. */
+static esp_err_t h_prompt_sample(httpd_req_t *req)
+{
+    if (!post_ok(req)) {
+        return ESP_OK;
+    }
+    if (!usb_audio_handset_connected()) {
+        return send_msg(req, "409 Conflict", false, "Plug in the handset first.");
+    }
+    if (sip_call_state() != CALL_IDLE || secret_active()) {
+        return send_msg(req, "409 Conflict", false, "The phone is busy. Try again when it is idle.");
+    }
+    ESP_LOGI(TAG, "sample prompt from the web page");
+    prompt_play(PROMPT_NO_ANSWER);
+    return send_msg(req, "200 OK", true, "Playing on the handset.");
 }
 
 /*
@@ -1362,7 +1402,7 @@ void setup_server_start(void)
     cfg.server_port = APP_HTTP_PORT;
     cfg.stack_size = APP_HTTP_STACK;
     cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 18; /* 16 registered */
+    cfg.max_uri_handlers = 18; /* 17 registered */
     cfg.lru_purge_enable = true;
     cfg.core_id = 0;
     httpd_handle_t srv = NULL;
@@ -1377,6 +1417,7 @@ void setup_server_start(void)
         {.uri = "/api/provision", .method = HTTP_POST, .handler = h_provision},
         {.uri = "/api/contacts", .method = HTTP_POST, .handler = h_contacts},
         {.uri = "/api/settings", .method = HTTP_POST, .handler = h_settings},
+        {.uri = "/api/prompt/sample", .method = HTTP_POST, .handler = h_prompt_sample},
         {.uri = "/api/bedtime", .method = HTTP_POST, .handler = h_bedtime},
         {.uri = "/api/pins", .method = HTTP_POST, .handler = h_pins},
         {.uri = "/api/secret", .method = HTTP_POST, .handler = h_secret},

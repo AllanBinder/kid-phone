@@ -1,4 +1,8 @@
 # Name,   Type, SubType, Offset,  Size, Flags
+# nvs and phy_init never move (saved settings survive an update). The app
+# partition grew from 0x300000 to 0x7F0000 in 0.7.0 for the Catalan and
+# Spanish prompts (about 1 MB of PCM per language); it ends at the 8 MB mark,
+# so an N8 board still fits.
 nvs,      data, nvs,     0x9000,  0x6000,
 phy_init, data, phy,     0xf000,  0x1000,
-factory,  app,  factory, 0x10000, 0x300000,
+factory,  app,  factory, 0x10000, 0x7F0000,

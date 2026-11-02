@@ -251,6 +251,16 @@ After a firmware update the Status box may say the Twilio account still
 has the call program from older phone software. Press **Run setup again**
 once (it needs the Auth Token); changing numbers alone does not update it.
 
+**Voice language** (since 0.7.0): the setup page's **Voice language** card
+picks English (the default), Catalan (Català) or Spanish (Español) for every
+sentence in the table above. **Save** applies it at once, no token needed;
+**Play a sample** says "They didn't answer the phone." on the handset in the
+saved language (handset plugged in, phone idle). The phone tells Twilio its
+language on every call, so Twilio's own no-answer sentence follows a change
+right away too, once the account has the 0.7.0 call program (**Run setup
+again** once after updating from 0.6.x or older; until then Twilio keeps
+saying it in English).
+
 Contact lights: on = can be called now, off = not set up, outside their
 hours, bedtime (all off), or the phone itself cannot call (no WiFi or Twilio
 not set up; then all are off), blinking = being called or recording a
@@ -348,6 +358,14 @@ If the upload cannot connect, hold BOOT, tap RST, release BOOT, and retry.
 Ctrl-C quits the monitor. After editing `sdkconfig.defaults`, delete
 `sdkconfig.esp32s3` so the change is picked up.
 
+Partitions (`partitions.csv`): `nvs` 0x9000 (24 KB), `phy_init` 0xf000,
+one `factory` app at 0x10000. The app partition is 0x7F0000 (about 8 MB,
+ending at the 8 MB mark so an N8 board still boots) since 0.7.0, up from
+3 MB, because each prompt language adds about 1 MB of PCM; the app is about
+4.7 MB with three languages. `nvs` and `phy_init` did not move,
+so `pio run -t upload` from 0.6.x keeps every setting (it writes the new
+partition table with the bootloader and app). No OTA partitions.
+
 `sdkconfig.defaults` adds, among others, `CONFIG_LWIP_MAX_SOCKETS=16`,
 `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y` and `CONFIG_LWIP_SNTP_MAX_SERVERS=2`
 (two NTP servers).
@@ -386,6 +404,7 @@ All runtime config lives in NVS, namespace `kidphone` (`src/config_store.c`):
 | `smtp_user`, `smtp_pass` | str | same; login (a full email address, also the sender) and app password. The password is never returned by any endpoint and never logged |
 | `smtp_from`, `kid_name` | str | same; sender name on the email (missing = "Kid Phone") and the child's name for the subject (missing = none); erased when empty |
 | `sec_max_s`, `sec_cap_hr`, `sec_bed` | u16, u8, u8 | same; longest secret 10..120 s (missing = 60), secrets per hour 1..20 (missing = 5), 1 = allowed at bedtime (missing = no; erased when off) |
+| `lang` | u8 | `POST /api/settings`; language of the spoken prompts (`prompt_lang_t`): 1 = Catalan, 2 = Spanish. Missing (also every phone before 0.7.0) = English; erased when set back to English |
 
 Schedule blob (`sched_blob_t` in `config_store.c`, packed, little endian):
 `version` u8 (1), `enabled` u8, `nwin` u8, `tz` char[48] (POSIX TZ rule),
@@ -508,10 +527,11 @@ phone only has the station interface, so it is only reachable on the home LAN.
 | Endpoint | What |
 |---|---|
 | `GET /` | setup page |
-| `GET /api/status` | `secret` {`configured` (host, login and password saved), `smtp_host`, `smtp_port`, `smtp_security` ("tls" or "starttls"), `smtp_user`, `has_password` (never the password), `from_name`, `kid_name`, `max_seconds`, `hourly_cap`, `bedtime_ok` and the bounds, `last` {`seq`, `state` (none, recording, queued, sending, retrying, sent, failed, discarded), `message`, `slot`, `seconds`, `ago_s`, `utc` when recorded}, `test` {`seq`, `state`, `message`}, `last_hour`, `waiting`, `recording`}, each contact's `secret` ("off", "hold", "dedicated") and `email`, `settings` {`max_call_minutes` and its bounds}, `bedtime` {`enabled`, `start`, `end` ("HH:MM", home time), `tz`, `tz_name`, `scheduled` = on with a valid home time zone, `active` = asleep now}, WiFi, Twilio (provisioned, caller ID, account SID, SIP user, `login_current`, `numbers_key` = a restricted key is stored), one contact slot per wired button with schedule, `available`, `next` {day, time} in their time zone, `time_synced`, handset, call state and contact, last call result (`code`, `kind`, `message`), setup progress (`state`, `run`, `steps`, on failure `error`, `hint`, `needs_token`) |
+| `GET /api/status` | `secret` {`configured` (host, login and password saved), `smtp_host`, `smtp_port`, `smtp_security` ("tls" or "starttls"), `smtp_user`, `has_password` (never the password), `from_name`, `kid_name`, `max_seconds`, `hourly_cap`, `bedtime_ok` and the bounds, `last` {`seq`, `state` (none, recording, queued, sending, retrying, sent, failed, discarded), `message`, `slot`, `seconds`, `ago_s`, `utc` when recorded}, `test` {`seq`, `state`, `message`}, `last_hour`, `waiting`, `recording`}, each contact's `secret` ("off", "hold", "dedicated") and `email`, `settings` {`max_call_minutes` and its bounds, `lang` ("en", "ca", "es")}, `bedtime` {`enabled`, `start`, `end` ("HH:MM", home time), `tz`, `tz_name`, `scheduled` = on with a valid home time zone, `active` = asleep now}, WiFi, Twilio (provisioned, caller ID, account SID, SIP user, `login_current`, `numbers_key` = a restricted key is stored), one contact slot per wired button with schedule, `available`, `next` {day, time} in their time zone, `time_synced`, handset, call state and contact, last call result (`code`, `kind`, `message`), setup progress (`state`, `run`, `steps`, on failure `error`, `hint`, `needs_token`) |
 | `POST /api/contacts` | `{contacts:[{name, number, schedule:{enabled, tz, tz_name, windows:[{days, start, end}]}, secret, email} x up to 24]}` (a number or a secret mode on a slot with no button pin: 400; `secret` "hold" needs a number, "dedicated" must have none, either needs a plain `email`). A phone not set up with Twilio can save secret buttons only (no numbers at all) here; saves names, button order and schedules without a token. If the set of numbers differs from what Twilio allows and a numbers key is stored: 202 `{updating: true, run}`, the key run starts (progress in `/api/status`; if Twilio rejects the key it fails with `needs_token`). No key: 409 `{needs_token: true}` |
 | `POST /api/provision` | `{account_sid, auth_token, contacts, full}` (202 `{ok, message, run}`). Already set up with its own login, same account, `full` not true: numbers-only update. Otherwise the full setup. `account_sid` may be omitted once stored. Old `contact_name`/`contact_number` still accepted |
-| `POST /api/settings` | `{max_call_minutes}`, a whole number 1..120 (400 otherwise); no token |
+| `POST /api/settings` | `{max_call_minutes, lang}`, either may be left out (400 if both are): a whole number 1..120, and "en", "ca" or "es" (400 otherwise; nothing is saved if either is bad). A new `lang` applies to the next prompt and the next call's INVITE. No token |
+| `POST /api/prompt/sample` | `{}`: play "They didn't answer the phone." on the handset in the saved language. 409 without a handset, during a call or while a secret is going |
 | `POST /api/secret` | `{smtp_host, smtp_port, smtp_security, smtp_user, smtp_pass, from_name, kid_name, max_seconds, hourly_cap, bedtime_ok}`: secret message email account and limits. `smtp_pass` missing or empty keeps the saved one (spaces are removed, as app passwords are shown in groups), `clear_password: true` erases it. 400 on a bad host, port, login (must be an email address) or out-of-range limit. Device only, no token |
 | `POST /api/secret/test` | `{}`: a text-only test email to the login's own address with the saved settings; 202, the outcome in `/api/status` `secret.test` (409 if not set up, no WiFi, or an email is already being sent) |
 | `POST /api/bedtime` | `{enabled, start, end, tz, tz_name}`: times as "HH:MM" or minutes of the day (home time), `tz` a POSIX TZ rule. 400 if a time is missing or out of range, if on with equal times, or if `tz` does not parse (required when on). Device only, no token |
@@ -570,18 +590,24 @@ that stops later cannot leave the phone out of step with Twilio.
    progress log shows a warning: Twilio may then check the wrong password and
    answer 403 after a correct-looking login (what happened on 2026-10-10).
 5. Serverless service `kid-phone`, environment `prod`, function `voice`,
-   asset `no-answer` (each looked up by name before it is created); upload
-   `twilio/voice.js` (embedded at build time, one source of truth) as
-   `/voice`, protected, and `twilio/no_answer.wav` as `/no-answer.wav`,
-   public (the spoken "They didn't answer the phone." for the Function's
-   `<Play>`; only that sentence, nothing about the family); one build with
-   both versions and `APP_PROV_FN_DEPS`; poll until completed (2 min
+   assets `no-answer`, `no-answer-ca`, `no-answer-es` (each looked up by
+   name before it is created); upload `twilio/voice.js` (embedded at build
+   time, one source of truth) as `/voice`, protected, and
+   `twilio/no_answer.wav`, `no_answer_ca.wav`, `no_answer_es.wav` as
+   `/no-answer.wav`, `/no-answer-ca.wav`, `/no-answer-es.wav`, public (the
+   spoken "They didn't answer the phone." in each prompt language for the
+   Function's `<Play>`; only that sentence, nothing about the family),
+   uploaded one at a time (each about 17 KB, one buffer of the clip plus
+   1 KB); one build with the function version, all three asset versions and
+   `APP_PROV_FN_DEPS`; poll until completed (2 min
    timeout); set `CALLER_ID` and `ALLOWED`; deploy; save
    `APP_TW_PROGRAM_VERSION` (NVS `tw_prog`). A phone whose saved value is
    lower than the firmware's (0 = set up by firmware before this marker)
    shows "Run setup again" in the Status box. Bump the constant whenever
-   `twilio/voice.js` or an asset changes. A rerun uploads a new function and
-   asset version (the old ones stay unused, like before).
+   `twilio/voice.js` or an asset changes (3 since 0.7.0: the language
+   assets). A rerun uploads a new function and asset versions (the old ones
+   stay unused, like before). All three clips are always installed, so a
+   language change on the phone needs no Twilio run.
 6. SIP domain `VoiceUrl = https://<env domain>/voice` (POST).
 7. Save account SID, SIP domain/user/password, caller ID, contacts with
    schedules, `provisioned=1`.
@@ -792,41 +818,74 @@ at idle as above. Mode C is the only way to hear the dial tone by default.
 
 ### Spoken prompts
 
-The phone speaks nine short sentences (table in Setup). They are made
-offline by `scripts/gen_prompts.py` and committed as raw 16 kHz mono 16-bit
-little-endian PCM in `src/prompts/` (about 1 MB in all, embedded with
-`EMBED_FILES` in `src/CMakeLists.txt` and `board_build.embed_files` in
-`platformio.ini`; the two lists must match). The phone never synthesizes
+The phone speaks nine short sentences (table in Setup), in English, Catalan
+or Spanish (NVS `lang`, the setup page's **Voice language** card). They are
+made offline by `scripts/gen_prompts.py` and committed as raw 16 kHz mono
+16-bit little-endian PCM in `src/prompts/`: `<name>.pcm` English,
+`<name>_ca.pcm` Catalan, `<name>_es.pcm` Spanish (about 1 MB per language,
+embedded with `EMBED_FILES` in `src/CMakeLists.txt` and
+`board_build.embed_files` in `platformio.ini`; the two lists must match). The
+names stay flat so every embedded symbol is unique
+(`_binary_time_up_ca_pcm_start`). `prompts.c` keeps one clip table per
+language; `prompt_set_lang()` (at boot from NVS, and on every save) picks the
+table, and the audio task looks the clip up when a prompt starts, so one that
+is playing finishes in its own language. The phone never synthesizes
 speech and never fetches audio. The audio task plays a prompt through its own
 FIR interpolator (16 kHz to the earpiece rate, 3x for the 48 kHz handset,
 copied to both channels), one 10 ms block per pass like every other mode, so
 it cannot stall or underrun the earpiece. A prompt starting a call is
 dropped; a handset whose rate is not a multiple of 16 kHz gets tones only.
 
-Voice: [Piper](https://github.com/rhasspy/piper) `en_US-ljspeech-high`
-(rhasspy/piper-voices, pinned revision and sha256 in the script). Its
-MODEL_CARD lists the training data as the LJ Speech dataset, license public
-domain, and the voice was trained from scratch on it, so the generated clips
-can be redistributed with this repo. Do not switch to a voice fine-tuned
-from `lessac` (Blizzard license) or trained on CC BY-NC data without
-checking its MODEL_CARD first.
+Voices (each pinned to a revision and sha256 in the script, and each
+trained from scratch on openly licensed recordings, so the generated clips
+can be redistributed with this repo):
+
+| Language | Voice | Training data | Clip license |
+|---|---|---|---|
+| English | [Piper](https://github.com/rhasspy/piper) `en_US-ljspeech-high` | LJ Speech, public domain | public domain |
+| Spanish | Piper `es_ES-carlfm-x_low` | [carlfm01 Spanish speech](https://github.com/carlfm01/my-speech-datasets), public domain | public domain |
+| Catalan | [Matxa-TTS v2 central Catalan](https://huggingface.co/BSC-LT/matxa-tts-v2-ca-central-graphemes) (GPL-3.0) with the WaveNext vocoder (Apache-2.0), speaker "ona" | Catalan Common Voice (CC0), then Festcat (CC BY-SA 3.0 ES) and OpenSLR 69 (CC BY-SA 4.0) | CC BY-SA 3.0 ES |
+
+The Catalan clips (`src/prompts/*_ca.pcm`, `twilio/no_answer_ca.wav`) use
+the Festcat voice "Ona" and are licensed CC BY-SA 3.0 ES, not Apache-2.0:
+voice from the Festcat corpus, Universitat Politecnica de Catalunya
+(https://festcat.talp.cat); speech model Matxa-TTS by the Barcelona
+Supercomputing Center, Projecte Aina and ILENIA. Reuse them under the same
+license, with that credit.
+
+Why these voices: the higher-quality Piper Catalan and Spanish voices are
+fine-tuned from `lessac` (Blizzard research license), and the Aina
+multi-accent Catalan voices (LaFrescat) and the alVoCat vocoder are
+non-commercial only. Do not switch to a voice fine-tuned from `lessac` or
+trained on non-commercial data without checking its model card first. The
+Catalan model has no number or abbreviation expansion: spell those out in
+the phrases.
 
 Levels: active speech at about -23 dBFS RMS with peaks held at or below
 -7 dBFS, a little under the dial tone (-20 dBFS RMS, -14 dBFS peak) and
 about level with the status tones. The earpiece runs at 100 % volume against
-a child's ear, so keep it there. Speech is slowed a little (Piper length
-scale 1.2) and high-passed at 120 Hz for the small earpiece.
+a child's ear, so keep it there. Speech is slowed a little (length scale
+1.2 English, 1.15 Spanish, 1.1 Catalan) and high-passed at 120 Hz for the small earpiece.
 
-To change a sentence, edit `PROMPTS` in the script and run it with only the
-clips that changed (Piper output varies slightly between runs, so the others
+To change a sentence, edit its language's `prompts` in `LANGS` in the script
+and run it with only the clips that changed (TTS output varies slightly between runs, so the others
 would change too; listen to the result):
 
 ```
 python3.12 -m venv ~/.venv-piper && ~/.venv-piper/bin/pip install piper-tts
 ~/.venv-piper/bin/python scripts/gen_prompts.py no_answer   # needs ffmpeg on PATH; no names = all
+~/.venv-piper/bin/python scripts/gen_prompts.py --lang ca secret_start
 ```
 
-`no_answer` also writes `twilio/no_answer.wav`, the same mastered clip as
+Another language: add its clips with `scripts/gen_prompts.py`, a
+`PROMPT_LANG_*` value (append, the number is stored in NVS), a table row in
+`prompts.c`, the files to both embed lists, an entry in `LANGS` in
+`twilio/voice.js` and `k_assets` in `twilio_provision.c`, an option on the
+setup page, and a bump of `APP_TW_PROGRAM_VERSION`. Each language costs about
+1 MB of the 8 MB app partition, so about three more fit.
+
+`no_answer` also writes `twilio/no_answer.wav` (and `no_answer_ca.wav`,
+`no_answer_es.wav` for the other languages), the same mastered clip as
 8 kHz mono mu-law WAV (the call's codec, so Twilio does not transcode it),
 which Twilio plays on the call when nobody picks up. Call audio reaches the
 earpiece with no extra gain, so it is as loud as the phone's own copy.
@@ -884,7 +943,8 @@ the SIP server every 20 s so the remote BYE still gets through the NAT.
   `action`, so Twilio asks it again when the dial ends, with
   `DialCallStatus`, while the phone's leg is still up:
   - `no-answer` or `busy` (declined): `<Play>` the public asset
-    `https://<env domain>/no-answer.wav` ("They didn't answer the phone.",
+    `https://<env domain>/no-answer.wav` (or `-ca` / `-es`, see the language
+    header below; "They didn't answer the phone.",
     the phone's own Piper voice, 8 kHz mu-law WAV made by
     `scripts/gen_prompts.py`), `<Pause length="4">`, `<Hangup>`. The pause
     keeps the call past `APP_SHORT_CALL_MS` (5 s) so the phone does not add
@@ -903,7 +963,17 @@ the SIP server every 20 s so the remote BYE still gets through the NAT.
   with no second phone. Set it back to `off` afterwards (environment variable
   changes need a redeploy).
 - The phone sends `INVITE sip:<contact number>@<SIP domain>`, so the user
-  part is the E.164 number.
+  part is the E.164 number. Every INVITE also carries
+  `X-Kidphone-Lang: en|ca|es` (the prompt language, `APP_SIP_LANG_HEADER`).
+  Twilio hands custom `X-` headers to the Function as
+  `event['SipHeader_X-Kidphone-Lang']`; `voice.js` looks it up without
+  regard to case and treats a missing or unknown value as English. The
+  `<Dial>` action request does not repeat SIP headers, so the action URL
+  carries the language on as `/voice?lang=ca` (Functions merge query
+  parameters into `event`). The language picks the no-answer asset
+  (`/no-answer-ca.wav`, `/no-answer-es.wav`) and the `<Say>` text and
+  `language` (`ca-ES`, `es-ES`) of the fallback lines; echo test mode stays
+  English. A call program older than 0.7.0 ignores the header (English).
 - All of the above except buying the number, KYC and geo permissions is now
   done by the phone itself (see Twilio provisioning).
 
@@ -1059,12 +1129,12 @@ src/sip.c/.h          minimal SIP UA over UDP: INVITE + digest auth, CANCEL, BYE
 src/rtp.c/.h          PCMU RTP sender/receiver tasks, jitter buffer, stream buffer to the audio task
 src/usb_audio.c/.h    USB host + UAC driver: hot-plug, descriptor log, format choice, volume/mute
 src/audio_engine.c/.h audio task (core 1): mic jitter ring, modes A-D and CALL, prompt playback, stats
-src/prompts.c/.h      spoken prompt table and play requests (clips embedded from src/prompts/)
-src/prompts/*.pcm     the spoken prompts, 16 kHz mono s16le, made by scripts/gen_prompts.py
+src/prompts.c/.h      spoken prompt tables (one per language), language setting and play requests (clips embedded from src/prompts/)
+src/prompts/*.pcm     the spoken prompts, 16 kHz mono s16le, made by scripts/gen_prompts.py (<name>.pcm English, <name>_ca.pcm, <name>_es.pcm)
 src/app_config.h      all tunables (assignable and default button and LED GPIOs, block size, volumes, buffers, SIP/RTP ports and timers)
 src/secrets.h         optional developer override (gitignored; template secrets.h.example)
-twilio/voice.js       Twilio Function behind the SIP Domain voice URL (allowlist, echo test, no-answer sentence); embedded and uploaded by provisioning
-twilio/no_answer.wav  "They didn't answer the phone." for Twilio's <Play> (8 kHz mu-law, 17 KB, made by scripts/gen_prompts.py); embedded and uploaded as a public asset
+twilio/voice.js       Twilio Function behind the SIP Domain voice URL (allowlist, echo test, no-answer sentence in the INVITE's language); embedded and uploaded by provisioning
+twilio/no_answer*.wav "They didn't answer the phone." for Twilio's <Play> in English, Catalan (_ca) and Spanish (_es) (8 kHz mu-law, about 17 KB each, made by scripts/gen_prompts.py); embedded and uploaded as public assets
 scripts/gen_prompts.py regenerates src/prompts/*.pcm (and twilio/no_answer.wav) with Piper TTS (offline, developer only); pass clip names to regenerate only those
 web/                  browser flasher page + ESP Web Tools manifest (scripts/build_web_bin.sh builds the image)
 components/g711/      G.711 mu-law encode/decode (reusable, pure functions)
@@ -1086,6 +1156,17 @@ scripts/build_web_bin.sh                    # merge the existing build
 scripts/build_web_bin.sh --build            # pio run first, then merge
 scripts/build_web_bin.sh --version 0.4.0    # set the manifest version
 ```
+
+Updating a phone from the browser: the merged image runs from offset 0
+through the end of the app, and `esptool merge_bin` fills the gap between
+the partition table and the app (0x9000 to 0x10000, `nvs` and `phy_init`)
+with 0xFF. So a browser install always erases the saved settings (WiFi comes
+back through Improv, the rest needs the setup page again), whether or not
+the erase option is ticked. That was already so before 0.7.0; the larger app
+partition in 0.7.0 needs nothing extra, since the image carries the new
+partition table. To keep settings, update over USB with `pio run -t upload`
+instead. The 0.7.0 image is about twice the size of 0.6.0's (about 4.7 MB),
+so the browser install takes longer.
 
 `web/firmware/*.bin` is gitignored on purpose: the image contains whatever
 `src/secrets.h` held at build time (WiFi and SIP credentials). Only publish

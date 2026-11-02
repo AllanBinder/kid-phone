@@ -134,7 +134,7 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     <div class="row hidden" id="r-key"><span>Changing numbers</span><span id="s-key">...</span></div>
     <div class="row hidden" id="r-secret"><span>Secret messages</span><span><span id="s-secret">...</span><a class="jump" href="#c-secret" id="l-secret">Settings</a></span></div>
     <div class="note hidden" id="old-login">This phone still uses the shared login from older software. Press <b>Run setup again</b> below to give it its own.</div>
-    <div class="note hidden" id="old-program">Your Twilio account still has the call program from older phone software. Press <b>Run setup again</b> below to update it (the phone then tells your child when nobody answers).</div>
+    <div class="note hidden" id="old-program">Your Twilio account still has the call program from older phone software. Press <b>Run setup again</b> below to update it (the phone then tells your child when nobody answers, in the phone's language).</div>
   </section>
 
   <section class="card">
@@ -156,6 +156,20 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     <p class="hint">When a call reaches this length the phone hangs up and says "Time's up". The child can press the button again to call back.</p>
     <button type="button" id="b-maxmin">Save</button>
     <p class="hint" id="maxmin-msg"></p>
+  </section>
+
+  <section class="card" id="c-lang">
+    <h2>Voice language</h2>
+    <label for="lang">Language the phone speaks in</label>
+    <select id="lang" style="max-width: 320px">
+      <option value="en">English</option>
+      <option value="ca" lang="ca">Català</option>
+      <option value="es" lang="es">Español</option>
+    </select>
+    <p class="hint">Every sentence the phone says ("They didn't answer the phone", "Time's up", bedtime, secrets) uses this language. The sentence Twilio plays when nobody answers follows it too (after a phone software update, press <b>Run setup again</b> once). <b>Play a sample</b> says one sentence on the handset.</p>
+    <button type="button" id="b-lang">Save</button>
+    <button type="button" class="secondary" id="b-lang-play">Play a sample</button>
+    <p class="hint" id="lang-msg"></p>
   </section>
 
   <section class="card" id="c-bed">
@@ -440,6 +454,7 @@ let pendingContacts = null; /* contacts waiting for the Auth Token ("numbers" mo
  * form is never reloaded over the edits. */
 let pendingRun = null;
 let mmDirty = false; /* call length edited, not saved yet */
+let langDirty = false; /* voice language picked, not saved yet */
 let bedDirty = false, bedSig = null; /* bedtime edited, not saved yet / what the form was loaded from */
 let resetting = false; /* factory reset sent: stop polling, the phone is going away */
 let pinRows = null; /* [{button, lamp}] being edited, lamp -1 = no light */
@@ -798,6 +813,7 @@ function render() {
   const mm = $("maxmin");
   if (set.max_call_minutes && document.activeElement !== mm && !mmDirty) mm.value = set.max_call_minutes;
   if (set.max_call_minutes_lo) { mm.min = set.max_call_minutes_lo; mm.max = set.max_call_minutes_hi; }
+  if (set.lang && !langDirty) $("lang").value = set.lang;
   renderBedtime();
   renderPins();
   renderSecret();
@@ -1189,6 +1205,31 @@ $("b-maxmin").addEventListener("click", async () => {
   $("b-maxmin").disabled = false;
   $("maxmin-msg").textContent = r.ok ? "Saved." : (r.j.error || "Could not save. Try again.");
   if (r.ok) { mmDirty = false; kick(); }
+});
+
+/* ---------- voice language ---------- */
+
+async function saveLang() {
+  const r = await api("/api/settings", {lang: $("lang").value});
+  $("lang-msg").textContent = r.ok ? "Saved." : (r.j.error || "Could not save. Try again.");
+  if (r.ok) { langDirty = false; kick(); }
+  return r.ok;
+}
+
+$("lang").addEventListener("change", () => { langDirty = true; $("lang-msg").textContent = ""; });
+$("b-lang").addEventListener("click", async () => {
+  $("b-lang").disabled = true;
+  await saveLang();
+  $("b-lang").disabled = false;
+});
+/* The sample plays the saved language: save a new pick first. */
+$("b-lang-play").addEventListener("click", async () => {
+  $("b-lang-play").disabled = true;
+  if (!langDirty || await saveLang()) {
+    const r = await api("/api/prompt/sample", {});
+    $("lang-msg").textContent = r.ok ? "Playing on the handset." : (r.j.error || "Could not play. Try again.");
+  }
+  $("b-lang-play").disabled = false;
 });
 
 /* ---------- bedtime ---------- */

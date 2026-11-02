@@ -22,6 +22,7 @@
 
 #include "app_config.h"
 #include "config_store.h"
+#include "prompts.h"
 #include "rtp.h"
 #include "wifi.h"
 
@@ -841,6 +842,8 @@ static void send_invite(void)
     }
     sb_printf(&s, "Allow: " ALLOW_METHODS "\r\n");
     sb_printf(&s, "User-Agent: " APP_SIP_USER_AGENT "\r\n");
+    /* The Twilio Function speaks its no-answer sentence in this language. */
+    sb_printf(&s, APP_SIP_LANG_HEADER ": %s\r\n", prompt_lang_code(prompt_lang()));
     sb_printf(&s, "Content-Type: application/sdp\r\n");
     sb_printf(&s, "Content-Length: %u\r\n\r\n%s", (unsigned)strlen(sdp), sdp);
     if (s.overflow) {

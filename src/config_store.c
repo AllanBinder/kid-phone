@@ -11,6 +11,7 @@
 
 #include "app_config.h"
 #include "pins.h"
+#include "prompts.h"
 
 /* Optional developer override (gitignored). The build works without it. */
 #if __has_include("secrets.h")
@@ -324,6 +325,11 @@ static void load(void)
     get_str(h, "home_tz_name", s_cfg.bedtime.tz_name, sizeof(s_cfg.bedtime.tz_name));
     load_pins(h, &s_cfg.pins);
     load_secret(h, &s_cfg.secret);
+    /* Missing (every phone before 0.7.0) or unknown = English. */
+    uint8_t lang = PROMPT_LANG_EN;
+    if (nvs_get_u8(h, "lang", &lang) == ESP_OK && lang < PROMPT_LANG_COUNT) {
+        s_cfg.lang = lang;
+    }
     uint8_t p = 0;
     nvs_get_u8(h, "provisioned", &p);
     /* Only trust the flag if the SIP account and a contact are really there. */
@@ -858,6 +864,41 @@ esp_err_t config_set_max_call_minutes(unsigned minutes)
     nvs_close(h);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "saving the call length failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+uint8_t config_lang(void)
+{
+    lock();
+    uint8_t l = s_cfg.lang;
+    unlock();
+    return l;
+}
+
+esp_err_t config_set_lang(uint8_t lang)
+{
+    if (lang >= PROMPT_LANG_COUNT) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    lock();
+    err = lang == PROMPT_LANG_EN ? erase_key(h, "lang") : nvs_set_u8(h, "lang", lang);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    if (err == ESP_OK) {
+        s_cfg.lang = lang;
+    }
+    s_gen++;
+    unlock();
+    nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "saving the language failed: %s", esp_err_to_name(err));
     }
     return err;
 }
