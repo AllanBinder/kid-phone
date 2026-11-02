@@ -107,6 +107,15 @@ a.jump { color: var(--accent); font-size: 14px; font-weight: 600; white-space: n
 #attempts li { padding: 4px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
 #attempts li:last-child { border-bottom: 0; }
 #attempts li .bad { font-weight: 600; }
+.pinrow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.pinrow:last-child { border-bottom: 0; }
+.pinrow b { min-width: 72px; }
+.pinrow select { width: auto; min-width: 110px; padding: 6px 8px; }
+.pinrow button.mini { margin: 0 0 0 auto; }
+.secret-box { margin: 10px 0 0; }
+.secret-box select { max-width: 320px; }
+#c-secret details { margin: 12px 0 0; }
+#c-secret details > summary { font-size: 15px; }
 footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 24px; }
 </style>
 </head>
@@ -123,13 +132,14 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     <div class="row"><span>Clock</span><span id="s-clock">...</span></div>
     <div class="row"><span>Calls come from</span><span id="s-from">...</span></div>
     <div class="row hidden" id="r-key"><span>Changing numbers</span><span id="s-key">...</span></div>
+    <div class="row hidden" id="r-secret"><span>Secret messages</span><span><span id="s-secret">...</span><a class="jump" href="#c-secret" id="l-secret">Settings</a></span></div>
     <div class="note hidden" id="old-login">This phone still uses the shared login from older software. Press <b>Run setup again</b> below to give it its own.</div>
     <div class="note hidden" id="old-program">Your Twilio account still has the call program from older phone software. Press <b>Run setup again</b> below to update it (the phone then tells your child when nobody answers).</div>
   </section>
 
   <section class="card">
     <h2>Who the phone calls</h2>
-    <p>Each button on the phone calls one person, and the light next to it is on when they can be called. You can fill in one to four.</p>
+    <p>Each button on the phone calls one person, and the light next to it is on when they can be called. <span id="family-n">You can fill in one to four.</span></p>
     <form id="family" autocomplete="off"></form>
     <button type="button" id="b-save" class="hidden">Save</button>
     <p class="hint" id="save-msg"></p>
@@ -159,6 +169,73 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     <p class="hint">Bedtime follows the clock at home, not the time zones of the people on the buttons.</p>
     <button type="button" id="b-bed">Save</button>
     <p class="hint" id="bed-msg"></p>
+  </section>
+
+  <section class="card" id="c-secret">
+    <h2>Secret messages</h2>
+    <p>A button can record a secret: your child talks into the handset and the phone emails the recording to that button's person, as a sound file, from your own email account. Nothing goes through Twilio or anyone else. Pick which buttons do this under Who the phone calls.</p>
+    <p id="sec-status"></p>
+    <h3>Email account</h3>
+    <label for="sec-prov">Email provider</label>
+    <select id="sec-prov" style="max-width: 320px">
+      <option value="gmail">Gmail</option>
+      <option value="icloud">iCloud Mail</option>
+      <option value="yahoo">Yahoo Mail</option>
+      <option value="other">Other</option>
+    </select>
+    <details id="sec-gmail">
+      <summary>How to get a Gmail app password</summary>
+      <ol>
+        <li>Open <b>myaccount.google.com/security</b> and turn on <b>2-Step Verification</b> (Google only offers app passwords with it on).</li>
+        <li>Open <b>myaccount.google.com/apppasswords</b>, type a name like "Kid Phone" and press <b>Create</b>.</li>
+        <li>Copy the 16 letter password into App password below. The spaces don't matter.</li>
+      </ol>
+      <p class="hint">The phone only uses the app password to send. It can't sign in to your account, and you can remove it on the same page to switch secrets off. Some providers (possibly Outlook.com and Hotmail) may not allow app passwords; any provider with SMTP login works.</p>
+    </details>
+    <div class="two">
+      <div><label for="sec-user">Your email address (the login)</label><input id="sec-user" type="email" autocomplete="off" spellcheck="false" autocapitalize="off"></div>
+      <div><label for="sec-pass">App password</label>
+        <div class="pw"><input id="sec-pass" type="password" autocomplete="new-password" spellcheck="false" autocapitalize="off"><button type="button" class="secondary mini" id="b-sec-show">Show</button></div></div>
+    </div>
+    <p class="hint" id="sec-pass-hint">Not your normal password: an app password from your email provider.</p>
+    <div id="sec-server" class="hidden">
+      <div class="two">
+        <div><label for="sec-host">Mail server (SMTP)</label><input id="sec-host" placeholder="smtp.example.com" spellcheck="false" autocapitalize="off"></div>
+        <div><label for="sec-port">Port</label><input id="sec-port" type="number" inputmode="numeric" min="1" max="65535" step="1"></div>
+      </div>
+      <label for="sec-tls">Security</label>
+      <select id="sec-tls" style="max-width: 320px">
+        <option value="tls">SSL/TLS (usually port 465)</option>
+        <option value="starttls">STARTTLS (usually port 587)</option>
+      </select>
+    </div>
+    <div class="two">
+      <div><label for="sec-from">Sender name on the email</label><input id="sec-from" maxlength="47" placeholder="Kid Phone"></div>
+      <div><label for="sec-kid">Your child's name</label><input id="sec-kid" maxlength="31" placeholder="Mia"></div>
+    </div>
+    <p class="hint">The subject reads "A secret from Mia, 7:42 pm".</p>
+    <h3 style="margin-top: 16px">Limits</h3>
+    <div class="two">
+      <div><label for="sec-max">Longest secret, in seconds</label><input id="sec-max" type="number" inputmode="numeric" min="10" max="120" step="1"></div>
+      <div><label for="sec-cap">Secrets per hour, at most</label><input id="sec-cap" type="number" inputmode="numeric" min="1" max="20" step="1"></div>
+    </div>
+    <p class="hint">A press of the same button ends a secret early. Past the hourly limit the button plays the busy tone.</p>
+    <label class="toggle"><input type="checkbox" id="sec-bed"> Allow secrets at bedtime</label>
+    <button type="button" id="b-sec">Save</button>
+    <button type="button" class="secondary" id="b-sec-test">Send test email</button>
+    <p class="hint" id="sec-msg"></p>
+  </section>
+
+  <section class="card" id="c-pins">
+    <h2>Buttons and lights</h2>
+    <p>Which pin on the phone's board each button and its light are wired to. Use the GPIO numbers printed next to the pins. A button goes from its pin to GND. A light goes from its pin through a 330 ohm resistor to the LED's long leg, and the short leg to GND.</p>
+    <div id="pin-rows"></div>
+    <button type="button" class="secondary mini" id="b-pin-add">+ Add a button</button>
+    <p class="hint hidden" id="pin-full">Every pin is in use. To add another button, set one of the lights to No light to free its pin.</p>
+    <div class="alert hidden" id="pin-warn"></div>
+    <p class="hint">A light is optional. A button with no light still calls, it just can't show when the person is available or that it's bedtime. Changes work as soon as you press Save, no restart needed.</p>
+    <button type="button" id="b-pins">Save</button>
+    <p class="hint" id="pins-msg"></p>
   </section>
 
   <section class="card hidden" id="c-tw">
@@ -229,7 +306,7 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     <details id="adv">
       <summary>Advanced</summary>
       <h3>Factory reset</h3>
-      <p>Erases everything on the phone: the WiFi, the Twilio connection, the people on each button, their times, the call length and bedtime. Nothing in your Twilio account is deleted.</p>
+      <p>Erases everything on the phone: the WiFi, the Twilio connection, the people on each button, their times, the call length, bedtime and the button pins (back to buttons on GPIO 4-7 and lights on 15-18). Nothing in your Twilio account is deleted.</p>
       <p>Afterwards the phone is off every saved WiFi network, so this page stops working. Set it up again from the start: plug its COM port into a computer and open the installer page.</p>
       <label for="reset-word">Type RESET to confirm</label>
       <input id="reset-word" autocomplete="off" spellcheck="false" autocapitalize="characters" style="max-width: 200px">
@@ -341,7 +418,9 @@ const PRESETS = [
   ["Weekend mornings", 0b1000001, 9 * 60, 12 * 60],
   ["Every day, daytime", 0b1111111, 9 * 60, 19 * 60],
 ];
-const NSLOTS = 4, NWIN = 4;
+const NWIN = 4;
+/* One contact block per wired button (Buttons and lights). */
+const nslots = () => (st.pins && st.pins.buttons ? st.pins.buttons.length : 4);
 
 const $ = (id) => document.getElementById(id);
 const show = (id, on) => $(id).classList.toggle("hidden", !on);
@@ -363,6 +442,21 @@ let pendingRun = null;
 let mmDirty = false; /* call length edited, not saved yet */
 let bedDirty = false, bedSig = null; /* bedtime edited, not saved yet / what the form was loaded from */
 let resetting = false; /* factory reset sent: stop polling, the phone is going away */
+let pinRows = null; /* [{button, lamp}] being edited, lamp -1 = no light */
+let pinDirty = false, pinSig = null; /* pins edited, not saved yet / what the rows were loaded from */
+let secDirty = false, secSig = null; /* secret message settings edited / what the form was loaded from */
+let secTestSeq = null; /* test email sent: the test status seq before it, until it has an outcome */
+/* Mail providers the Secret messages card fills in (host, port, security). */
+const PROVIDERS = {
+  gmail: ["smtp.gmail.com", 465, "tls"],
+  icloud: ["smtp.mail.me.com", 587, "starttls"],
+  yahoo: ["smtp.mail.yahoo.com", 465, "tls"],
+};
+const SECRET_MODES = [
+  ["off", "Off"],
+  ["hold", "Long press records a secret (a short press still calls)"],
+  ["dedicated", "Secret button only (records, never calls)"],
+];
 
 function browserZone() {
   let z = "";
@@ -450,13 +544,14 @@ function contactBlock(i, c) {
   const num = el("input", {type: "tel", placeholder: "+1 555 123 4567", value: c.number || ""});
   name.className = "f-name";
   num.className = "f-num";
-  box.append(el("div", {className: "two"},
-    el("div", {}, el("label", {textContent: "Name"}), name),
-    el("div", {}, el("label", {textContent: "Phone number"}), num)));
+  const nameLabel = el("label", {textContent: "Name"});
+  const numCol = el("div", {}, el("label", {textContent: "Phone number"}), num);
+  box.append(el("div", {className: "two"}, el("div", {}, nameLabel, name), numCol));
 
   const tog = el("input", {type: "checkbox", checked: !!sched.enabled});
   tog.className = "f-sched";
-  box.append(el("label", {className: "toggle"}, tog, "Only when they're available"));
+  const togLabel = el("label", {className: "toggle"}, tog, "Only when they're available");
+  box.append(togLabel);
 
   const panel = el("div", {className: "sched"});
   panel.append(el("p", {className: "hint", textContent:
@@ -479,12 +574,30 @@ function contactBlock(i, c) {
   panel.append(adds);
   box.append(panel);
 
+  /* Secret messages for this button (the email account is set up in the
+   * Secret messages card). */
+  const sec = el("select", {});
+  sec.className = "f-secret";
+  for (const [v, t] of SECRET_MODES) sec.append(el("option", {value: v, textContent: t}));
+  sec.value = SECRET_MODES.some((m) => m[0] === c.secret) ? c.secret : "off";
+  const mail = el("input", {type: "email", maxLength: 63, placeholder: "grandma@example.com", value: c.email || "",
+    spellcheck: false, autocapitalize: "off"});
+  mail.className = "f-mail";
+  const mailBox = el("div", {}, el("label", {textContent: "Email the secrets to"}), mail);
+  box.append(el("div", {className: "secret-box"}, el("label", {textContent: "Secret messages"}), sec, mailBox));
+
   const sync = () => {
-    panel.classList.toggle("hidden", !tog.checked);
-    if (tog.checked && !wins.children.length) wins.append(windowRow({days: PRESETS[0][1], start: PRESETS[0][2], end: PRESETS[0][3]}));
+    const ded = sec.value === "dedicated";
+    numCol.classList.toggle("hidden", ded);
+    togLabel.classList.toggle("hidden", ded);
+    panel.classList.toggle("hidden", ded || !tog.checked);
+    mailBox.classList.toggle("hidden", sec.value === "off");
+    nameLabel.textContent = ded ? "Who the secrets are for" : "Name";
+    if (!ded && tog.checked && !wins.children.length) wins.append(windowRow({days: PRESETS[0][1], start: PRESETS[0][2], end: PRESETS[0][3]}));
     refreshAddButtons();
   };
   tog.addEventListener("change", sync);
+  sec.addEventListener("change", sync);
   sync();
   return box;
 }
@@ -498,13 +611,13 @@ function refreshAddButtons() {
 
 /* What the phone has saved (not the live availability), to notice changes. */
 function savedSig() {
-  return JSON.stringify((st.twilio.contacts || []).map((c) => [c.name, c.number, c.schedule]));
+  return JSON.stringify([nslots(), (st.twilio.contacts || []).map((c) => [c.name, c.number, c.schedule, c.secret, c.email])]);
 }
 
 function loadForm() {
   const f = $("family");
   const cs = (st.twilio.contacts || []);
-  f.replaceChildren(...Array.from({length: NSLOTS}, (_, i) => contactBlock(i, cs[i] || {})));
+  f.replaceChildren(...Array.from({length: nslots()}, (_, i) => contactBlock(i, cs[i] || {})));
   formSig = savedSig();
   dirty = false;
 }
@@ -515,8 +628,13 @@ function readForm() {
   for (const box of document.querySelectorAll(".contact")) {
     const i = Number(box.dataset.slot);
     const name = box.querySelector(".f-name").value.trim();
-    const number = box.querySelector(".f-num").value.trim();
-    const on = box.querySelector(".f-sched").checked;
+    const secret = box.querySelector(".f-secret").value;
+    const email = secret === "off" ? "" : box.querySelector(".f-mail").value.trim();
+    /* A secret button only never calls: no number, no hours. */
+    const number = secret === "dedicated" ? "" : box.querySelector(".f-num").value.trim();
+    const on = secret !== "dedicated" && box.querySelector(".f-sched").checked;
+    if (secret !== "off" && !email) return {error: "Button " + (i + 1) + ": add the email address the secret messages go to."};
+    if (secret === "hold" && !number) return {error: "Button " + (i + 1) + ": with Long press, a short press still calls, so it needs a phone number."};
     const opt = box.querySelector(".f-zone").selectedOptions[0];
     const windows = [];
     for (const w of box.querySelectorAll(".win")) {
@@ -530,14 +648,30 @@ function readForm() {
       windows.push({days, start: mins(from.value || "00:00"), end: mins(to.value || "00:00")});
     }
     if (number && on && !windows.length) return {error: "Button " + (i + 1) + ": add at least one time when they are available."};
-    out.push({name, number, schedule: {enabled: on, tz: opt ? opt.dataset.tz : "", tz_name: opt ? opt.dataset.name : "", windows}});
+    out.push({name, number, schedule: {enabled: on, tz: opt ? opt.dataset.tz : "", tz_name: opt ? opt.dataset.name : "", windows}, secret, email});
   }
-  if (!out.some((c) => c.number)) return {error: "Add at least one person to call, with their phone number."};
+  if (!out.some((c) => c.number || c.secret === "dedicated")) return {error: "Add at least one person to call, with their phone number, or a secret button."};
   return {contacts: out};
 }
 
-$("family").addEventListener("input", () => { dirty = true; if (!pendingRun) saveNote(""); });
-$("family").addEventListener("change", () => { dirty = true; });
+/* Save shows once Twilio is set up, or before that for secret buttons only
+ * (no numbers, so nothing for Twilio to allow). */
+function secretsOnlyForm() {
+  let ded = false, nums = false;
+  document.querySelectorAll(".contact").forEach((box) => {
+    const m = box.querySelector(".f-secret").value;
+    if (m === "dedicated") ded = true;
+    else if (box.querySelector(".f-num").value.trim()) nums = true;
+  });
+  return ded && !nums;
+}
+function updSaveButton() {
+  if (!st) return;
+  show("b-save", (st.twilio.provisioned || secretsOnlyForm()) && st.setup.state !== "running");
+}
+
+$("family").addEventListener("input", () => { dirty = true; if (!pendingRun) saveNote(""); updSaveButton(); });
+$("family").addEventListener("change", () => { dirty = true; updSaveButton(); });
 
 /* ---------- save outcome ---------- */
 
@@ -630,6 +764,13 @@ function trackSave(s, running) {
 /* ---------- status rendering ---------- */
 
 function availText(c) {
+  if (c.secret === "dedicated") {
+    const s = st.secret || {};
+    if (!s.configured) return ["Secret button (set up the email account below)", false];
+    if (st.bedtime && st.bedtime.active && !s.bedtime_ok) return ["Secret button, bedtime (light off until " + st.bedtime.end + ")", false];
+    if (s.waiting) return ["Secret button (the last secret is still being sent)", false];
+    return ["Secret button, ready", true];
+  }
   if (!c.number) return ["Not used", false];
   if (st.bedtime && st.bedtime.active) return ["Bedtime (light off until " + st.bedtime.end + ")", false];
   if (!st.time_synced && c.scheduled) return ["Available (clock not synced yet)", true];
@@ -658,6 +799,11 @@ function render() {
   if (set.max_call_minutes && document.activeElement !== mm && !mmDirty) mm.value = set.max_call_minutes;
   if (set.max_call_minutes_lo) { mm.min = set.max_call_minutes_lo; mm.max = set.max_call_minutes_hi; }
   renderBedtime();
+  renderPins();
+  renderSecret();
+  const n = nslots();
+  $("family-n").textContent = n === 1 ? "The phone has one button." :
+    "The phone has " + n + " buttons. Fill in as many as you like.";
 
   const s = st.setup, running = s.state === "running";
   if (formSig !== null) trackSave(s, running);
@@ -689,7 +835,7 @@ function render() {
   $("b-connect").disabled = running || !w.connected;
   show("b-tw-cancel", t.provisioned);
   if (!$("sid").value && t.account_sid) $("sid").value = t.account_sid;
-  show("b-save", t.provisioned && !running);
+  updSaveButton();
   $("b-save").disabled = running;
 
   show("c-ready", t.provisioned && !running);
@@ -926,7 +1072,9 @@ async function poll() {
     if (r.ok) { st = r.j; render(); }
   } catch (e) {}
   if (resetting) return;
-  const busy = st && (st.setup.state === "running" || st.call.state !== "IDLE" || watchSeq !== null);
+  const sec = st && st.secret;
+  const busy = st && (st.setup.state === "running" || st.call.state !== "IDLE" || watchSeq !== null || secTestSeq !== null ||
+    (sec && (sec.recording || ["queued", "sending"].includes(sec.last.state))));
   pollTimer = setTimeout(poll, busy ? 1000 : 3000);
 }
 
@@ -1095,6 +1243,239 @@ $("b-bed").addEventListener("click", async () => {
   $("b-bed").disabled = false;
   $("bed-msg").textContent = r.ok ? "Saved." : (r.j.error || "Could not save. Try again.");
   if (r.ok) { bedDirty = false; bedSig = null; kick(); }
+});
+
+/* ---------- buttons and lights ---------- */
+
+const plural = (n, word) => n + " " + word + (n === 1 ? "" : "s");
+
+function renderPins() {
+  const p = st.pins;
+  if (!p) return;
+  const sig = JSON.stringify(p.buttons);
+  if (sig !== pinSig && !pinDirty) {
+    pinRows = p.buttons.map((b) => ({button: b.button, lamp: b.lamp}));
+    pinSig = sig;
+    drawPins();
+  }
+}
+
+function pinChanged() {
+  pinDirty = true;
+  $("pins-msg").textContent = "";
+  drawPins();
+}
+
+/* Pins not used by any row yet, in board order. */
+function freePins(rows) {
+  const used = new Set();
+  rows.forEach((r) => { used.add(r.button); if (r.lamp >= 0) used.add(r.lamp); });
+  return st.pins.assignable.filter((g) => !used.has(g));
+}
+
+/* One select of pins: this row's own pin plus the free ones (and "No light"). */
+function pinSelect(cur, free, noneLabel) {
+  const sel = el("select", {});
+  if (noneLabel) sel.append(el("option", {value: "-1", textContent: noneLabel}));
+  for (const g of st.pins.assignable) {
+    if (g === cur || free.includes(g)) sel.append(el("option", {value: String(g), textContent: "GPIO " + g}));
+  }
+  sel.value = String(cur);
+  return sel;
+}
+
+function drawPins() {
+  const all = st.pins.assignable, free = freePins(pinRows);
+  $("pin-rows").replaceChildren(...pinRows.map((r, i) => {
+    const bs = pinSelect(r.button, free, null);
+    bs.addEventListener("change", () => { r.button = Number(bs.value); pinChanged(); });
+    const ls = pinSelect(r.lamp, free, "No light");
+    ls.addEventListener("change", () => { r.lamp = Number(ls.value); pinChanged(); });
+    const row = el("div", {className: "pinrow"}, el("b", {textContent: "Button " + (i + 1)}), "Button", bs, "Light", ls);
+    if (i === pinRows.length - 1 && pinRows.length > 1) {
+      const rm = el("button", {type: "button", className: "secondary mini", textContent: "Remove"});
+      rm.addEventListener("click", () => {
+        const c = (st.twilio.contacts || [])[i];
+        if (c && c.number) {
+          $("pins-msg").textContent = "Button " + (i + 1) + " still calls " + (c.name || "someone") +
+            ". Clear their number under Who the phone calls and press Save there first.";
+          return;
+        }
+        if (c && c.secret && c.secret !== "off") {
+          $("pins-msg").textContent = "Button " + (i + 1) + " still records secret messages. Turn them off under Who the phone calls and press Save there first.";
+          return;
+        }
+        pinRows.pop();
+        pinChanged();
+      });
+      row.append(rm);
+    }
+    return row;
+  }));
+  $("b-pin-add").disabled = !free.length || pinRows.length >= st.pins.max;
+  show("pin-full", !free.length && pinRows.length < st.pins.max && pinRows.some((r) => r.lamp >= 0));
+  /* Every button can only have a light while buttons use at most half the pins. */
+  const nb = pinRows.length, left = all.length - nb, short = nb - left;
+  show("pin-warn", short > 0);
+  if (short > 0) {
+    $("pin-warn").textContent = "You're using " + plural(nb, "pin") + " for buttons. That leaves " + plural(left, "pin") +
+      ", so " + plural(short, "button") + " won't be able to have a light.";
+  }
+}
+
+$("b-pin-add").addEventListener("click", () => {
+  if (!pinRows) return;
+  const free = freePins(pinRows);
+  if (!free.length) return;
+  /* A light too, while buttons use at most half the pins (past that a light
+   * would take a pin another button could use). */
+  const lamp = free.length > 1 && (pinRows.length + 1) * 2 <= st.pins.assignable.length;
+  pinRows.push({button: free[0], lamp: lamp ? free[1] : -1});
+  pinChanged();
+});
+
+$("b-pins").addEventListener("click", async () => {
+  if (!pinRows || !pinRows.length) return;
+  $("b-pins").disabled = true;
+  let r;
+  try { r = await api("/api/pins", {buttons: pinRows}); } catch (e) { r = {ok: false, j: {}}; }
+  $("b-pins").disabled = false;
+  $("pins-msg").textContent = r.ok ? (r.j.message || "Saved.") : (r.j.error || "Could not save. Try again.");
+  if (r.ok) { pinDirty = false; pinSig = null; kick(); }
+});
+
+/* ---------- secret messages ---------- */
+
+/* "Last secret: sent 7:42 pm" and friends, for the Status card and this one. */
+function secretLine(s) {
+  const l = s.last || {};
+  const at = l.ago_s !== undefined ?
+    new Date(Date.now() - l.ago_s * 1000).toLocaleTimeString([], {hour: "numeric", minute: "2-digit"}) : "";
+  switch (l.state) {
+    case "recording": return ["Recording a secret now.", "good"];
+    case "queued": return ["Last secret: waiting to be sent.", ""];
+    case "sending": return ["Sending a secret...", ""];
+    case "retrying": return ["Last secret: not sent yet. " + l.message, "bad"];
+    case "sent": return ["Last secret: sent " + at + ".", "good"];
+    case "failed": return ["Last secret: failed at " + at + ". " + l.message, "bad"];
+    case "discarded": return ["Last secret: not sent. " + l.message, ""];
+  }
+  return s.configured ? ["Ready. No secrets since the phone started.", "good"] : ["Set up the email account below to use them.", "bad"];
+}
+
+function provOf(host) {
+  if (!host) return "gmail";
+  for (const [k, v] of Object.entries(PROVIDERS)) if (v[0] === host) return k;
+  return "other";
+}
+
+function secProvChanged() {
+  const k = $("sec-prov").value, pr = PROVIDERS[k];
+  if (pr) { $("sec-host").value = pr[0]; $("sec-port").value = pr[1]; $("sec-tls").value = pr[2]; }
+  show("sec-server", !pr);
+  show("sec-gmail", k === "gmail");
+}
+
+function loadSecret(s) {
+  $("sec-prov").value = provOf(s.smtp_host);
+  $("sec-host").value = s.smtp_host || "";
+  $("sec-port").value = s.smtp_port || 465;
+  $("sec-tls").value = s.smtp_security || "tls";
+  secProvChanged();
+  $("sec-user").value = s.smtp_user || "";
+  $("sec-pass").value = "";
+  $("sec-pass").placeholder = s.has_password ? "Saved (type a new one to change it)" : "";
+  $("sec-from").value = s.from_name || "";
+  $("sec-kid").value = s.kid_name || "";
+  $("sec-max").value = s.max_seconds || 60;
+  $("sec-cap").value = s.hourly_cap || 5;
+  $("sec-max").min = s.max_seconds_lo || 10; $("sec-max").max = s.max_seconds_hi || 120;
+  $("sec-cap").min = s.hourly_cap_lo || 1; $("sec-cap").max = s.hourly_cap_hi || 20;
+  $("sec-bed").checked = !!s.bedtime_ok;
+  secDirty = false;
+}
+
+function renderSecret() {
+  const s = st.secret;
+  if (!s) return;
+  const sig = JSON.stringify([s.smtp_host, s.smtp_port, s.smtp_security, s.smtp_user, s.has_password, s.from_name,
+    s.kid_name, s.max_seconds, s.hourly_cap, s.bedtime_ok]);
+  if (sig !== secSig && !secDirty) { loadSecret(s); secSig = sig; }
+  const [text, cls] = secretLine(s);
+  setText("sec-status", text, cls);
+  const used = (st.twilio.contacts || []).some((c) => c.secret && c.secret !== "off");
+  show("r-secret", used || s.configured);
+  setText("s-secret", text, cls);
+  if (secTestSeq !== null && s.test.seq > secTestSeq && s.test.state !== "sending") {
+    secTestSeq = null;
+    $("b-sec-test").disabled = false;
+    $("sec-msg").textContent = s.test.state === "sent" ?
+      "Test email sent to " + s.smtp_user + ". Check that inbox (and its spam folder)." : "Test email failed: " + s.test.message;
+  }
+}
+
+function readSecret() {
+  const host = $("sec-host").value.trim(), user = $("sec-user").value.trim();
+  const port = Number($("sec-port").value), max = Number($("sec-max").value), cap = Number($("sec-cap").value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return {error: "Pick a port from 1 to 65535."};
+  if (!Number.isInteger(max) || max < Number($("sec-max").min) || max > Number($("sec-max").max))
+    return {error: "Pick a longest secret from " + $("sec-max").min + " to " + $("sec-max").max + " seconds."};
+  if (!Number.isInteger(cap) || cap < Number($("sec-cap").min) || cap > Number($("sec-cap").max))
+    return {error: "Pick " + $("sec-cap").min + " to " + $("sec-cap").max + " secrets per hour."};
+  if (user && !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(user)) return {error: "The login should be your full email address."};
+  const body = {smtp_host: host, smtp_port: port, smtp_security: $("sec-tls").value, smtp_user: user,
+    from_name: $("sec-from").value.trim(), kid_name: $("sec-kid").value.trim(), max_seconds: max, hourly_cap: cap,
+    bedtime_ok: $("sec-bed").checked};
+  const pass = $("sec-pass").value;
+  if (pass) body.smtp_pass = pass;
+  return {body};
+}
+
+async function saveSecret() {
+  const f = readSecret();
+  if (f.error) { $("sec-msg").textContent = f.error; return false; }
+  let r;
+  try { r = await api("/api/secret", f.body); } catch (e) { r = {ok: false, j: {}}; }
+  $("sec-msg").textContent = r.ok ? "Saved." : (r.j.error || "Could not save. Try again.");
+  if (r.ok) { secDirty = false; secSig = null; $("sec-pass").value = ""; kick(); }
+  return r.ok;
+}
+
+["sec-host", "sec-port", "sec-tls", "sec-user", "sec-pass", "sec-from", "sec-kid", "sec-max", "sec-cap", "sec-bed"].forEach((id) => {
+  $(id).addEventListener("input", () => { secDirty = true; $("sec-msg").textContent = ""; });
+  $(id).addEventListener("change", () => { secDirty = true; });
+});
+$("sec-prov").addEventListener("change", () => { secDirty = true; $("sec-msg").textContent = ""; secProvChanged(); });
+$("b-sec-show").addEventListener("click", () => {
+  const p = $("sec-pass"), hide = p.type === "text";
+  p.type = hide ? "password" : "text";
+  $("b-sec-show").textContent = hide ? "Show" : "Hide";
+});
+$("b-sec").addEventListener("click", async () => {
+  $("b-sec").disabled = true;
+  await saveSecret();
+  $("b-sec").disabled = false;
+});
+$("b-sec-test").addEventListener("click", async () => {
+  $("b-sec-test").disabled = true;
+  /* Unsaved edits go first, so the test uses what is on the screen. */
+  if (secDirty && !(await saveSecret())) { $("b-sec-test").disabled = false; return; }
+  const before = st.secret ? st.secret.test.seq : 0;
+  let r;
+  try { r = await api("/api/secret/test", {}); } catch (e) { r = {ok: false, j: {}}; }
+  if (!r.ok) {
+    $("b-sec-test").disabled = false;
+    $("sec-msg").textContent = r.j.error || "Could not send. Try again.";
+    return;
+  }
+  secTestSeq = before;
+  $("sec-msg").textContent = "Sending a test email...";
+  kick();
+});
+$("l-secret").addEventListener("click", (ev) => {
+  ev.preventDefault();
+  $("c-secret").scrollIntoView({behavior: "smooth", block: "start"});
+  history.replaceState(null, "", "#c-secret");
 });
 
 $("b-tw-cancel").addEventListener("click", () => {

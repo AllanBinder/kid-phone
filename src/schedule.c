@@ -17,12 +17,14 @@
 
 static const char *TAG = "schedule";
 
+_Static_assert(CFG_MAX_CONTACTS <= 32, "s_avail_mask has one bit per contact");
+
 #define WEEK_MIN (7 * 1440)
 /* Anything before 2025-01-01 means the clock has not been set since boot. */
 #define TIME_PLAUSIBLE 1735689600
 
 static _Atomic bool s_synced;
-static _Atomic uint32_t s_avail_mask = 0xff; /* bit i = contact i available */
+static _Atomic uint32_t s_avail_mask = UINT32_MAX; /* bit i = contact i available */
 static _Atomic bool s_bedtime;               /* asleep now */
 
 static void on_sync(struct timeval *tv)
@@ -177,7 +179,7 @@ static void sched_task(void *arg)
     (void)arg;
     bool sntp_started = false;
     bool warned_unsynced = false;
-    uint32_t last_mask = 0xff;
+    uint32_t last_mask = UINT32_MAX;
     app_cfg_t *cfg = malloc(sizeof(app_cfg_t));
     assert(cfg);
     while (1) {

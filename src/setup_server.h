@@ -11,6 +11,11 @@
  *                          token; 409 needs_token if the set of numbers changed
  *   POST /api/call         {contact}: test call (same rules as that button)
  *   POST /api/settings     {max_call_minutes}: longest call, no token
+ *   POST /api/secret       {smtp_host, smtp_port, smtp_security, smtp_user,
+ *                          smtp_pass, from_name, kid_name, max_seconds,
+ *                          hourly_cap, bedtime_ok}: secret message email and
+ *                          limits; an empty smtp_pass keeps the saved one
+ *   POST /api/secret/test  {}: send a test email to the login's own address
  *   POST /api/hangup       hang up
  *   POST /api/factory_reset {confirm: "RESET"}: erase all settings, reboot
  *                          into setup (400 unless confirm is exactly RESET)
@@ -23,7 +28,8 @@
  *   POST /api/wifi/remove  {ssid, confirm}: forget one; the network the phone
  *                          is on needs confirm: true, the last one is refused
  *
- * No secret is ever returned. POST bodies must be application/json, which a
+ * No secret is ever returned (the Twilio token, SIP password, key secret or
+ * the email app password). POST bodies must be application/json, which a
  * cross-site page cannot send without a CORS preflight this server never
  * answers; the Host header must be kidphone.local or an IP (DNS rebinding).
  */

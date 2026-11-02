@@ -5,26 +5,50 @@
  */
 #pragma once
 
-/* Contact buttons and LEDs: button i calls contact i, LED i shows whether
- * contact i can be called right now. Any number of them may be wired (one is
- * fine); an unwired button input idles high on its pull-up and never fires.
+/* Contact buttons and LEDs: button i calls contact i, its light (optional)
+ * shows whether contact i can be called right now. The parent picks the pins
+ * on the setup page (NVS "pins", see config_store.h and pins.h); a contact
+ * without a light still calls, it just has no availability or bedtime light.
  *
  * Buttons: momentary switch between the GPIO and GND, internal pull-up.
  * LEDs: active high, GPIO -> 330 ohm -> LED -> GND (or an LED module with a
  * built-in resistor).
  *
- * Pin choice on the ESP32-S3 N16R8 DevKitC: none of these is a strapping pin
- * (0, 3, 45, 46), USB (19/20), UART0 (43/44), flash or octal PSRAM (26-37),
- * JTAG (39-42) or the onboard RGB LED (48). GPIO 4-7 and 15-18 sit next to
- * each other on the left header, so the buttons share one run and the LEDs
- * another. 15/16 are the optional 32 kHz crystal pins, unused on the DevKitC. */
-#define APP_NUM_BUTTONS         4
+ * Pins a parent may assign on the ESP32-S3 N16R8 DevKitC clone (YD-ESP32-S3),
+ * every one broken out on the headers:
+ *   1, 2, 4-18, 21, 38-42, 47 (24 pins)
+ * Left out:
+ *   0, 3, 45, 46   strapping pins (0 is also the BOOT button, APP_BOOT_GPIO)
+ *   19, 20         native USB D-/D+, the USB host port for the handset
+ *   22-25          do not exist on the ESP32-S3
+ *   26-32          SPI flash
+ *   33-37          octal PSRAM (N16R8)
+ *   43, 44         UART0: console, flashing and Improv Serial
+ *   48             onboard WS2812 status LED (APP_LED_GPIO)
+ * 39-42 are the pad JTAG pins, but JTAG on this build goes over the USB
+ * Serial/JTAG peripheral (eFuse default) and the native USB pins belong to the
+ * USB host anyway, so nothing uses pad JTAG and they are plain GPIOs. 15/16
+ * are the optional 32 kHz crystal pins, unused on the DevKitC. 38 drives the
+ * RGB LED on some other DevKitC boards, but not on this one. Nothing else in
+ * the firmware claims a GPIO. Order here is the order the page lists them.
+ * CFG_MAX_CONTACTS matches the count, so every pin can be a button (with no
+ * lights). */
+#define APP_ASSIGNABLE_GPIOS    {1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 21, 38, 39, 40, 41, 42, 47}
+#define APP_NUM_ASSIGNABLE      24
+/* Pins used when NVS has no "pins" entry (every phone set up before 0.5.0,
+ * and after a factory reset): four buttons on GPIO 4-7 with lights on 15-18.
+ * They sit next to each other on the left header, so the buttons share one
+ * run and the LEDs another. */
+#define APP_DEFAULT_BUTTONS     4
 #define APP_BUTTON_GPIOS        {4, 5, 6, 7}
 #define APP_CONTACT_LED_GPIOS   {15, 16, 17, 18}
 #define APP_BUTTON_DEBOUNCE_MS  30
 #define APP_BUTTON_POLL_MS      5
-/* Contact buttons only call and hang up: one action per press, on the press
- * edge, never on a hold. The parent-only controls are on the board's BOOT
+/* Contact buttons with secret messages off (the default) only call and hang
+ * up: one action per press, on the press edge, never on a hold. A button set
+ * to "long press" secrets calls on the release instead and starts a secret
+ * once held APP_SECRET_HOLD_MS; a dedicated secret button records on a press
+ * (main.c). The parent-only controls are on the board's BOOT
  * button instead (GPIO 0, active low, on-board pull-up). GPIO 0 is a
  * strapping pin: it is only read at runtime, never driven, and the reboot
  * after a factory reset waits for it to be released so the chip does not
@@ -152,7 +176,7 @@
  * and receive. The server is SIP_DOMAIN (secrets.h) on APP_SIP_SERVER_PORT. */
 #define APP_SIP_LOCAL_PORT      5060
 #define APP_SIP_SERVER_PORT     5060
-#define APP_SIP_USER_AGENT      "kid_phone/0.4"
+#define APP_SIP_USER_AGENT      "kid_phone/0.6"
 
 /* RFC 3261 timers. T1 = first retransmit interval, doubling each time;
  * non-INVITE retransmits cap at T2; transactions give up after 64*T1. */
@@ -221,7 +245,9 @@
 /* Setup web server (esp_http_server), port 80, LAN only (station interface). */
 #define APP_HTTP_PORT           80
 #define APP_HTTP_STACK          8192
-#define APP_HTTP_MAX_BODY       4096
+/* Largest request body: a full contact list (CFG_MAX_CONTACTS slots with
+ * schedules and secret emails) is about 14 KB. */
+#define APP_HTTP_MAX_BODY       20480
 
 /* Twilio provisioning task. TLS + JSON parsing need a big stack. */
 #define APP_PROV_STACK          16384
@@ -262,6 +288,61 @@
  * that is live and do not change it.
  *   2  (2026-10-18): Dial action, spoken "They didn't answer the phone." */
 #define APP_TW_PROGRAM_VERSION  2
+
+/* ---------------------------------------------------------------------------
+ * Secret messages: a recording from the handset mic, emailed by the phone
+ * itself over SMTP (secret.c, smtp.c)
+ * ------------------------------------------------------------------------- */
+
+/* Hold a "long press" button this long to start a secret (shorter = a call
+ * on release). */
+#define APP_SECRET_HOLD_MS      1500
+/* The beep after "Tell your secret after the beep!", and the "time's up"
+ * beep at the length limit. Recording starts APP_SECRET_BEEP_GAP_MS after
+ * the beep, so the beep itself is not in it. */
+#define APP_SECRET_BEEP_HZ      880.0f
+#define APP_SECRET_BEEP_AMPL    0.10f
+#define APP_SECRET_BEEP_MS      250
+#define APP_SECRET_BEEP_GAP_MS  150
+/* Recording format: mono 16-bit at this rate (the mic rate must be a whole
+ * multiple of it: 48 kHz, 32 kHz or 16 kHz). Low-pass corner of the
+ * decimator in front of it, under the 8 kHz Nyquist limit. */
+#define APP_SECRET_RATE         16000
+#define APP_SECRET_CUTOFF_HZ    6800.0f
+/* Shorter recordings are thrown away (an accidental hold, a quick double
+ * press): no email. */
+#define APP_SECRET_MIN_MS       2000
+/* Longest recording in seconds, set on the setup page (NVS sec_max_s). The
+ * buffer for the whole length is taken from PSRAM when a secret starts:
+ * 32 KB per second, 3.75 MB at the top of the range. */
+#define APP_SECRET_MAX_S_DEFAULT 60
+#define APP_SECRET_MAX_S_LO     10
+#define APP_SECRET_MAX_S_HI     120
+/* Secrets allowed in any 60 minutes (NVS sec_cap_hr); past it a press plays
+ * the busy tone. */
+#define APP_SECRET_CAP_DEFAULT  5
+#define APP_SECRET_CAP_LO       1
+#define APP_SECRET_CAP_HI       20
+/* Gentle level boost before sending (wav.h): at most this much gain. */
+#define APP_SECRET_MAX_GAIN     4.0f
+/* Display name on the email when the page leaves it empty. */
+#define APP_SECRET_FROM_DEFAULT "Kid Phone"
+/* SMTP ports: implicit TLS (the default, as Gmail uses) and STARTTLS. */
+#define APP_SMTP_PORT_TLS       465
+#define APP_SMTP_PORT_STARTTLS  587
+/* Each SMTP step (connect, every reply, every write) gives up after this. */
+#define APP_SECRET_SMTP_TIMEOUT_MS 20000
+/* Send task. The TLS handshake (certificate chain check, ECDHE) needs a
+ * big stack; the mbedtls buffers themselves are in PSRAM
+ * (CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC). */
+#define APP_SECRET_STACK        12288
+/* A secret that cannot be sent is tried again after RETRY_MIN, doubling up
+ * to RETRY_MAX, for TRIES tries in all (time with no WiFi does not count).
+ * Errors a retry cannot fix (login refused, recipient refused, no such
+ * server) give up at once. */
+#define APP_SECRET_RETRY_MIN_MS 15000
+#define APP_SECRET_RETRY_MAX_MS (16 * 60 * 1000)
+#define APP_SECRET_TRIES        8
 
 /* Onboard WS2812 RGB LED (GPIO 48 on this DevKitC clone; some boards use 38). */
 #define APP_LED_GPIO            48

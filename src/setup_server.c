@@ -15,8 +15,11 @@
 #include "app_config.h"
 #include "config_store.h"
 #include "modes.h"
+#include "pins.h"
 #include "schedule.h"
+#include "secret.h"
 #include "sip.h"
+#include "smtp.h"
 #include "twilio_provision.h"
 #include "usb_audio.h"
 #include "wifi.h"
@@ -171,6 +174,9 @@ static cJSON *contact_json(const cfg_contact_t *ct)
         cJSON_AddNumberToObject(jw, "end", sc->win[w].end_min);
         cJSON_AddItemToArray(wins, jw);
     }
+    static const char *modes[] = {"off", "hold", "dedicated"};
+    cJSON_AddStringToObject(ci, "secret", ct->secret <= CFG_SECRET_DEDICATED ? modes[ct->secret] : "off");
+    cJSON_AddStringToObject(ci, "email", ct->email);
     sched_state_t st;
     schedule_eval(sc, &st);
     cJSON_AddBoolToObject(ci, "available", ct->number[0] && st.available);
@@ -252,6 +258,45 @@ static void wifi_json(cJSON *w)
     }
 }
 
+/* Button and light pins: {max, assignable: [gpio...], buttons: [{button,
+ * lamp}]}, lamp -1 = no light. */
+static void pins_json(cJSON *o, const cfg_pins_t *p)
+{
+    int all[APP_NUM_ASSIGNABLE];
+    const int n = pins_assignable(all, APP_NUM_ASSIGNABLE);
+    cJSON_AddNumberToObject(o, "max", CFG_MAX_CONTACTS);
+    cJSON_AddItemToObject(o, "assignable", cJSON_CreateIntArray(all, n));
+    cJSON *arr = cJSON_AddArrayToObject(o, "buttons");
+    for (int i = 0; i < p->count && i < CFG_MAX_CONTACTS; i++) {
+        cJSON *e = cJSON_CreateObject();
+        cJSON_AddNumberToObject(e, "button", p->button[i]);
+        cJSON_AddNumberToObject(e, "lamp", p->lamp[i]);
+        cJSON_AddItemToArray(arr, e);
+    }
+}
+
+/* Secret message settings (never the password, only whether one is saved)
+ * and the last secret / test email. */
+static void secret_json(cJSON *o, const cfg_secret_t *s)
+{
+    cJSON_AddBoolToObject(o, "configured", s->host[0] && s->user[0] && s->pass[0]);
+    cJSON_AddStringToObject(o, "smtp_host", s->host);
+    cJSON_AddNumberToObject(o, "smtp_port", s->port);
+    cJSON_AddStringToObject(o, "smtp_security", s->security ? "starttls" : "tls");
+    cJSON_AddStringToObject(o, "smtp_user", s->user);
+    cJSON_AddBoolToObject(o, "has_password", s->pass[0] != '\0');
+    cJSON_AddStringToObject(o, "from_name", s->from_name);
+    cJSON_AddStringToObject(o, "kid_name", s->kid_name);
+    cJSON_AddNumberToObject(o, "max_seconds", s->max_s);
+    cJSON_AddNumberToObject(o, "max_seconds_lo", APP_SECRET_MAX_S_LO);
+    cJSON_AddNumberToObject(o, "max_seconds_hi", APP_SECRET_MAX_S_HI);
+    cJSON_AddNumberToObject(o, "hourly_cap", s->cap_hr);
+    cJSON_AddNumberToObject(o, "hourly_cap_lo", APP_SECRET_CAP_LO);
+    cJSON_AddNumberToObject(o, "hourly_cap_hi", APP_SECRET_CAP_HI);
+    cJSON_AddBoolToObject(o, "bedtime_ok", s->bed_ok);
+    secret_status_json(o);
+}
+
 static esp_err_t h_status(httpd_req_t *req)
 {
     if (!host_ok(req)) {
@@ -261,8 +306,13 @@ static esp_err_t h_status(httpd_req_t *req)
      * reports done, so "done" here always comes with the new contacts. */
     cJSON *setup = cJSON_CreateObject();
     twilio_provision_status_json(setup);
-    app_cfg_t c;
-    config_get(&c);
+    /* Several KB with CFG_MAX_CONTACTS slots: heap, not the server stack. */
+    app_cfg_t *c = malloc(sizeof(app_cfg_t));
+    if (!c) {
+        cJSON_Delete(setup);
+        return send_msg(req, "503 Service Unavailable", false, "The phone is busy. Try again.");
+    }
+    config_get(c);
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "firmware", esp_app_get_description()->version);
 
@@ -270,32 +320,43 @@ static esp_err_t h_status(httpd_req_t *req)
 
     /* Numbers are the parent's own data on their own network; secrets never. */
     cJSON *t = cJSON_AddObjectToObject(o, "twilio");
-    cJSON_AddBoolToObject(t, "provisioned", c.provisioned);
-    cJSON_AddStringToObject(t, "caller_id", c.caller_id);
-    cJSON_AddStringToObject(t, "sip_domain", c.sip_domain);
-    cJSON_AddStringToObject(t, "account_sid", c.account_sid);
-    cJSON_AddStringToObject(t, "sip_user", c.sip_user);
+    cJSON_AddBoolToObject(t, "provisioned", c->provisioned);
+    cJSON_AddStringToObject(t, "caller_id", c->caller_id);
+    cJSON_AddStringToObject(t, "sip_domain", c->sip_domain);
+    cJSON_AddStringToObject(t, "account_sid", c->account_sid);
+    cJSON_AddStringToObject(t, "sip_user", c->sip_user);
     char want_user[33];
     twilio_sip_username(want_user, sizeof(want_user));
     /* Set up by older firmware (shared "handset1" login): a full setup run
      * moves it to its own login. */
-    cJSON_AddBoolToObject(t, "login_current", strcmp(c.sip_user, want_user) == 0);
+    cJSON_AddBoolToObject(t, "login_current", strcmp(c->sip_user, want_user) == 0);
     /* Set up before the current call program (twilio/voice.js and its voice
      * clip): only a full setup run installs the new one. */
-    cJSON_AddBoolToObject(t, "program_current", c.call_program >= APP_TW_PROGRAM_VERSION);
+    cJSON_AddBoolToObject(t, "program_current", c->call_program >= APP_TW_PROGRAM_VERSION);
     /* Only whether the restricted numbers key exists; never the key itself. */
     cJSON_AddBoolToObject(t, "numbers_key",
-                          c.key_sid[0] && c.key_secret[0] && c.svc_sid[0] && c.env_sid[0]);
+                          c->key_sid[0] && c->key_secret[0] && c->svc_sid[0] && c->env_sid[0]);
+    /* One slot per wired button (and any slot further on that still has a
+     * number or a secret mode, which config_set_pins never leaves behind). */
+    int nslots = c->pins.count;
+    for (int i = nslots; i < CFG_MAX_CONTACTS; i++) {
+        if (c->contacts[i].number[0] || c->contacts[i].secret != CFG_SECRET_OFF) {
+            nslots = i + 1;
+        }
+    }
     cJSON *contacts = cJSON_AddArrayToObject(t, "contacts");
-    for (int i = 0; i < CFG_MAX_CONTACTS; i++) {
-        cJSON_AddItemToArray(contacts, contact_json(&c.contacts[i]));
+    for (int i = 0; i < nslots; i++) {
+        cJSON_AddItemToArray(contacts, contact_json(&c->contacts[i]));
     }
     cJSON *set = cJSON_AddObjectToObject(o, "settings");
-    cJSON_AddNumberToObject(set, "max_call_minutes", c.max_call_min);
+    cJSON_AddNumberToObject(set, "max_call_minutes", c->max_call_min);
     cJSON_AddNumberToObject(set, "max_call_minutes_lo", APP_CALL_MAX_MIN_LO);
     cJSON_AddNumberToObject(set, "max_call_minutes_hi", APP_CALL_MAX_MIN_HI);
-    bedtime_json(cJSON_AddObjectToObject(o, "bedtime"), &c.bedtime);
-    config_wipe(&c);
+    bedtime_json(cJSON_AddObjectToObject(o, "bedtime"), &c->bedtime);
+    pins_json(cJSON_AddObjectToObject(o, "pins"), &c->pins);
+    secret_json(cJSON_AddObjectToObject(o, "secret"), &c->secret);
+    config_wipe(c);
+    free(c);
     cJSON_AddBoolToObject(o, "time_synced", schedule_time_synced());
 
     cJSON_AddBoolToObject(o, "handset", usb_audio_handset_connected());
@@ -382,11 +443,31 @@ static int json_minutes(const cJSON *v)
     return -1;
 }
 
+/* Plain email address: one "@", a dot after it, no spaces, quotes, angle
+ * brackets or control characters (it goes into SMTP commands and headers). */
+static bool email_ok(const char *e)
+{
+    const size_t n = strlen(e);
+    const char *at = strchr(e, '@');
+    if (n < 6 || n > 63 || !at || at == e || strchr(at + 1, '@') || !strchr(at + 1, '.') || e[n - 1] == '.') {
+        return false;
+    }
+    for (const char *p = e; *p; p++) {
+        if ((unsigned char)*p <= ' ' || (unsigned char)*p >= 0x7f || strchr("<>()[]\\,;:\"", *p)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /*
  * contacts: [{name, number, schedule: {enabled, tz, tz_name, windows: [{days,
- * start, end}]}}, ...], up to CFG_MAX_CONTACTS slots in button order. Slots
- * not given, or with an empty number, are unused. Returns NULL if fine, else
- * a message for the parent.
+ * start, end}]}, secret, email}, ...], up to CFG_MAX_CONTACTS slots in button
+ * order. Slots not given, or with an empty number and secret "off", are
+ * unused; a number or a secret mode on a slot with no button pin (pins.h) is
+ * refused. secret: "off" (or missing), "hold" (long press records, needs a
+ * number) or "dedicated" (no number); either needs an email. Returns NULL if
+ * fine, else a message for the parent.
  */
 static const char *parse_contacts(const cJSON *arr, cfg_contact_t *out, char *err, size_t err_len)
 {
@@ -394,6 +475,9 @@ static const char *parse_contacts(const cJSON *arr, cfg_contact_t *out, char *er
     if (!cJSON_IsArray(arr) || cJSON_GetArraySize(arr) > CFG_MAX_CONTACTS) {
         return "Bad contact list.";
     }
+    cfg_pins_t pins;
+    config_get_pins(&pins);
+    const int nbuttons = pins.count;
     int i = 0;
     const cJSON *it;
     cJSON_ArrayForEach(it, arr) {
@@ -406,6 +490,52 @@ static const char *parse_contacts(const cJSON *arr, cfg_contact_t *out, char *er
             snprintf(err, err_len,
                      "Button %d: write the phone number in international format, starting with + and the country "
                      "code, like +1 555 123 4567.", i + 1);
+            return err;
+        }
+        if (ct->number[0] && i >= nbuttons) {
+            snprintf(err, err_len,
+                     "Button %d has no pin on the phone. Add it under Buttons and lights first, or leave it empty.",
+                     i + 1);
+            return err;
+        }
+        const char *mode = json_str(it, "secret");
+        if (!mode[0] || strcmp(mode, "off") == 0) {
+            ct->secret = CFG_SECRET_OFF;
+        } else if (strcmp(mode, "hold") == 0) {
+            ct->secret = CFG_SECRET_HOLD;
+        } else if (strcmp(mode, "dedicated") == 0) {
+            ct->secret = CFG_SECRET_DEDICATED;
+        } else {
+            snprintf(err, err_len, "Button %d: unknown secret message setting.", i + 1);
+            return err;
+        }
+        if (ct->secret != CFG_SECRET_OFF) {
+            char em[128]; /* longer than ct->email, so a long address is refused, not cut */
+            trim_copy(json_str(it, "email"), em, sizeof(em));
+            if (!email_ok(em)) {
+                snprintf(err, err_len, "Button %d: %s", i + 1,
+                         em[0] ? "that email address doesn't look right."
+                               : "add the email address the secret messages go to.");
+                return err;
+            }
+            strlcpy(ct->email, em, sizeof(ct->email));
+            if (i >= nbuttons) {
+                snprintf(err, err_len,
+                         "Button %d has no pin on the phone. Add it under Buttons and lights first, or turn its "
+                         "secret messages off.", i + 1);
+                return err;
+            }
+        }
+        if (ct->secret == CFG_SECRET_HOLD && !ct->number[0]) {
+            snprintf(err, err_len,
+                     "Button %d: with Long press, a short press still calls, so it needs a phone number. Pick "
+                     "Secret button only for a button that never calls.", i + 1);
+            return err;
+        }
+        if (ct->secret == CFG_SECRET_DEDICATED && ct->number[0]) {
+            snprintf(err, err_len,
+                     "Button %d is a secret button only, so it doesn't call anyone. Clear its phone number, or "
+                     "pick Long press.", i + 1);
             return err;
         }
         if (ct->number[0] && !ct->name[0]) {
@@ -439,10 +569,13 @@ static const char *parse_contacts(const cJSON *arr, cfg_contact_t *out, char *er
             snprintf(err, err_len, "%s: %s.", ct->name, why);
             return err;
         }
+        if (!ct->number[0]) {
+            memset(sc, 0, sizeof(*sc)); /* nobody to call: no hours to keep */
+        }
         i++;
     }
-    if (!config_any_contact(out)) {
-        return "Add at least one person to call, with their phone number.";
+    if (!config_any_contact(out) && !config_any_dedicated(out)) {
+        return "Add at least one person to call, with their phone number, or a secret button.";
     }
     return NULL;
 }
@@ -500,13 +633,19 @@ static esp_err_t h_provision(httpd_req_t *req)
     if (twilio_provision_running()) {
         return send_msg(req, "409 Conflict", false, "Setup is already running.");
     }
-    cJSON *j = read_json(req);
+    /* Contacts and config are several KB each: heap, not the server stack. */
+    cfg_contact_t *ct = calloc(CFG_MAX_CONTACTS, sizeof(cfg_contact_t));
+    app_cfg_t *c = malloc(sizeof(app_cfg_t));
+    const bool mem = ct && c;
+    cJSON *j = mem ? read_json(req) : NULL;
     if (!j) {
-        return send_msg(req, "400 Bad Request", false, "Missing, too large or bad request.");
+        free(ct);
+        free(c);
+        return mem ? send_msg(req, "400 Bad Request", false, "Missing, too large or bad request.")
+                   : send_msg(req, "503 Service Unavailable", false, "The phone is busy. Try again.");
     }
 
     char sid[40], token[80], errbuf[200];
-    cfg_contact_t ct[CFG_MAX_CONTACTS];
     trim_copy(json_str(j, "account_sid"), sid, sizeof(sid));
     trim_copy(json_str(j, "auth_token"), token, sizeof(token));
     const bool force_full = cJSON_IsTrue(cJSON_GetObjectItem(j, "full"));
@@ -515,7 +654,6 @@ static esp_err_t h_provision(httpd_req_t *req)
     if (arr) {
         err = parse_contacts(arr, ct, errbuf, sizeof(errbuf));
     } else {
-        memset(ct, 0, sizeof(ct));
         trim_copy(json_str(j, "contact_name"), ct[0].name, sizeof(ct[0].name));
         if (!normalize_number(json_str(j, "contact_number"), ct[0].number, sizeof(ct[0].number))) {
             err = "Write the phone number in international format, starting with + and the country code, "
@@ -531,18 +669,18 @@ static esp_err_t h_provision(httpd_req_t *req)
     }
     cJSON_Delete(j);
 
+    config_get(c);
     if (!sid[0]) {
-        app_cfg_t c;
-        config_get(&c);
-        strlcpy(sid, c.account_sid, sizeof(sid));
-        config_wipe(&c);
+        strlcpy(sid, c->account_sid, sizeof(sid));
     }
     bool sid_ok = strlen(sid) == 34 && sid[0] == 'A' && sid[1] == 'C';
     for (int i = 2; sid_ok && i < 34; i++) {
         sid_ok = isxdigit((unsigned char)sid[i]) != 0;
     }
     size_t tl = strlen(token);
-    if (!err && !sid_ok) {
+    if (!err && !config_any_contact(ct)) {
+        err = "Add at least one person to call, with their phone number.";
+    } else if (!err && !sid_ok) {
         err = "The Account SID should start with AC and be 34 characters long.";
     } else if (!err && (tl < 16 || tl > 64)) {
         err = "The Auth Token looks wrong. Click Show next to Auth Token in the Twilio Console and copy it again.";
@@ -550,16 +688,16 @@ static esp_err_t h_provision(httpd_req_t *req)
 
     /* Quick path only when the phone already has a working setup with its
      * own login and this is the same account. */
-    app_cfg_t c;
-    config_get(&c);
     char want_user[33];
     twilio_sip_username(want_user, sizeof(want_user));
-    bool quick = !force_full && c.provisioned && strcmp(c.sip_user, want_user) == 0 &&
-                 strcmp(c.account_sid, sid) == 0;
-    config_wipe(&c);
+    bool quick = !force_full && c->provisioned && strcmp(c->sip_user, want_user) == 0 &&
+                 strcmp(c->account_sid, sid) == 0;
+    config_wipe(c);
+    free(c);
 
     bool started = !err && twilio_provision_start(sid, token, ct, quick);
     mbedtls_platform_zeroize(token, sizeof(token));
+    free(ct);
     if (err) {
         return send_msg(req, "400 Bad Request", false, err);
     }
@@ -576,8 +714,9 @@ static esp_err_t h_provision(httpd_req_t *req)
 }
 
 /*
- * POST /api/contacts {contacts: [...]}: names and schedules, no Twilio token.
- * Numbers may move between buttons freely. A changed set of numbers has to
+ * POST /api/contacts {contacts: [...]}: names, schedules and secret message
+ * modes, no Twilio token. Numbers may move between buttons freely. A phone
+ * not connected to Twilio can save secret buttons only (no numbers). A changed set of numbers has to
  * reach the Twilio Function's ALLOWED list: with the stored restricted key
  * the update starts right away (202 {updating: true, run}, progress in
  * /api/status setup); without a key it answers 409 with needs_token, and the
@@ -595,23 +734,41 @@ static esp_err_t h_contacts(httpd_req_t *req)
     if (!j) {
         return send_msg(req, "400 Bad Request", false, "Missing, too large or bad request.");
     }
-    cfg_contact_t ct[CFG_MAX_CONTACTS];
+    /* Contacts and config are several KB each: heap, not the server stack. */
+    cfg_contact_t *ct = calloc(CFG_MAX_CONTACTS, sizeof(cfg_contact_t));
+    app_cfg_t *c = malloc(sizeof(app_cfg_t));
+    if (!ct || !c) {
+        free(ct);
+        free(c);
+        cJSON_Delete(j);
+        return send_msg(req, "503 Service Unavailable", false, "The phone is busy. Try again.");
+    }
     char errbuf[200];
     const char *err = parse_contacts(cJSON_GetObjectItem(j, "contacts"), ct, errbuf, sizeof(errbuf));
     cJSON_Delete(j);
     if (err) {
+        free(ct);
+        free(c);
         return send_msg(req, "400 Bad Request", false, err);
     }
-    app_cfg_t c;
-    config_get(&c);
-    bool provisioned = c.provisioned;
-    bool same = same_numbers(ct, c.contacts);
-    config_wipe(&c);
+    config_get(c);
+    bool provisioned = c->provisioned;
+    bool same = same_numbers(ct, c->contacts);
+    config_wipe(c);
+    free(c);
+    /* Once connected, Twilio setup always keeps at least one number. */
+    if (provisioned && !config_any_contact(ct)) {
+        free(ct);
+        return send_msg(req, "400 Bad Request", false,
+                        "Keep at least one person to call while the phone is connected to Twilio.");
+    }
     if (provisioned && !same && config_has_twilio_key()) {
+        bool started = wifi_is_connected() && twilio_provision_start_with_key(ct);
+        free(ct);
         if (!wifi_is_connected()) {
             return send_msg(req, "409 Conflict", false, "The phone is not on WiFi.");
         }
-        if (!twilio_provision_start_with_key(ct)) {
+        if (!started) {
             return send_msg(req, "409 Conflict", false, "The update could not start. Try again.");
         }
         ESP_LOGI(TAG, "number update with the stored key started from the web page");
@@ -622,7 +779,11 @@ static esp_err_t h_contacts(httpd_req_t *req)
         cJSON_AddStringToObject(o, "message", "Telling Twilio about the new numbers...");
         return send_json(req, "202 Accepted", o);
     }
-    if (!provisioned || !same) {
+    /* Not connected to Twilio and no numbers at all (secret buttons only):
+     * nothing for Twilio to allow, save right away. */
+    const bool secrets_only = !provisioned && !config_any_contact(ct);
+    if (!secrets_only && (!provisioned || !same)) {
+        free(ct);
         cJSON *o = cJSON_CreateObject();
         cJSON_AddBoolToObject(o, "ok", false);
         cJSON_AddBoolToObject(o, "needs_token", true);
@@ -632,7 +793,9 @@ static esp_err_t h_contacts(httpd_req_t *req)
                                                 : "Connect to Twilio first.");
         return send_json(req, "409 Conflict", o);
     }
-    if (config_set_contacts(ct) != ESP_OK) {
+    esp_err_t saved = config_set_contacts(ct);
+    free(ct);
+    if (saved != ESP_OK) {
         return send_msg(req, "500 Internal Server Error", false, "Could not save. Try again.");
     }
     ESP_LOGI(TAG, "contacts and schedules saved from the web page");
@@ -705,6 +868,75 @@ static esp_err_t h_bedtime(httpd_req_t *req)
     return send_msg(req, "200 OK", true, "Saved.");
 }
 
+/*
+ * POST /api/pins {buttons: [{button, lamp}, ...]}: which GPIO is button i and
+ * its light (lamp -1 or null = no light), 1..CFG_MAX_CONTACTS buttons in
+ * order. Every pin must be in APP_ASSIGNABLE_GPIOS and used once (400
+ * otherwise). Removing a button whose slot still has a number is refused
+ * (409): clear the number and Save first, so Twilio's ALLOWED list never
+ * holds a number no button can call. Device only, no token; the button task
+ * applies the new pins within about 100 ms, no restart.
+ */
+static esp_err_t h_pins(httpd_req_t *req)
+{
+    if (!post_ok(req)) {
+        return ESP_OK;
+    }
+    if (twilio_provision_running()) {
+        return send_msg(req, "409 Conflict", false, "Setup is running. Try again when it has finished.");
+    }
+    cJSON *j = read_json(req);
+    if (!j) {
+        return send_msg(req, "400 Bad Request", false, "Missing, too large or bad request.");
+    }
+    cfg_pins_t p;
+    memset(&p, 0, sizeof(p));
+    memset(p.button, -1, sizeof(p.button));
+    memset(p.lamp, -1, sizeof(p.lamp));
+    const cJSON *arr = cJSON_GetObjectItem(j, "buttons");
+    bool bad = !cJSON_IsArray(arr) || cJSON_GetArraySize(arr) < 1 || cJSON_GetArraySize(arr) > CFG_MAX_CONTACTS;
+    const cJSON *it;
+    if (!bad) {
+        cJSON_ArrayForEach(it, arr) {
+            const cJSON *b = cJSON_GetObjectItem(it, "button");
+            const cJSON *l = cJSON_GetObjectItem(it, "lamp");
+            if (!cJSON_IsNumber(b) || (l && !cJSON_IsNull(l) && !cJSON_IsNumber(l))) {
+                bad = true;
+                break;
+            }
+            const int bv = b->valueint, lv = cJSON_IsNumber(l) ? l->valueint : -1;
+            /* Out of int8 range can never be assignable: -2 fails validation. */
+            p.button[p.count] = (int8_t)(bv >= 0 && bv < 64 ? bv : -2);
+            p.lamp[p.count] = (int8_t)(lv >= -1 && lv < 64 ? lv : -2);
+            p.count++;
+        }
+    }
+    cJSON_Delete(j);
+    if (bad) {
+        char e[80];
+        snprintf(e, sizeof(e), "Send 1 to %d buttons, each with a pin.", CFG_MAX_CONTACTS);
+        return send_msg(req, "400 Bad Request", false, e);
+    }
+    char errbuf[200];
+    const char *why = pins_validate(&p, errbuf, sizeof(errbuf));
+    if (why) {
+        return send_msg(req, "400 Bad Request", false, why);
+    }
+    int slot = -1;
+    esp_err_t e = config_set_pins(&p, &slot);
+    if (e == ESP_ERR_INVALID_STATE) {
+        snprintf(errbuf, sizeof(errbuf),
+                 "Button %d still calls someone. Clear their number under Who the phone calls and press Save, "
+                 "then remove the button.", slot + 1);
+        return send_msg(req, "409 Conflict", false, errbuf);
+    }
+    if (e != ESP_OK) {
+        return send_msg(req, "500 Internal Server Error", false, "Could not save. Try again.");
+    }
+    ESP_LOGI(TAG, "pins saved from the web page: %u button%s", p.count, p.count == 1 ? "" : "s");
+    return send_msg(req, "200 OK", true, "Saved. The buttons and lights work on their new pins now.");
+}
+
 /* POST /api/call {contact: i}: test call, same rules as button i, except
  * bedtime: this is the parent testing, so it calls during bedtime too. */
 static esp_err_t h_call(httpd_req_t *req)
@@ -721,7 +953,9 @@ static esp_err_t h_call(httpd_req_t *req)
         }
         cJSON_Delete(j);
     }
-    if (idx < 0 || idx >= CFG_MAX_CONTACTS) {
+    cfg_pins_t pins;
+    config_get_pins(&pins);
+    if (idx < 0 || idx >= CFG_MAX_CONTACTS || idx >= pins.count) {
         return send_msg(req, "400 Bad Request", false, "No such button.");
     }
     if (!wifi_is_connected() || !config_is_provisioned() || twilio_provision_running()) {
@@ -729,6 +963,9 @@ static esp_err_t h_call(httpd_req_t *req)
     }
     if (sip_call_state() != CALL_IDLE) {
         return send_msg(req, "409 Conflict", false, "A call is already in progress.");
+    }
+    if (secret_active()) {
+        return send_msg(req, "409 Conflict", false, "The phone is recording a secret message right now.");
     }
     cfg_contact_t ct;
     if (!config_get_contact(idx, &ct)) {
@@ -743,6 +980,132 @@ static esp_err_t h_call(httpd_req_t *req)
     ESP_LOGI(TAG, "test call to contact %d from the web page", idx);
     sip_call_contact(idx);
     return send_msg(req, "202 Accepted", true, "Calling.");
+}
+
+/* smtp_security from the page: "tls" (or missing) = SMTP_TLS, "starttls" =
+ * SMTP_STARTTLS, anything else -1. */
+static int json_security(const cJSON *j)
+{
+    const char *v = json_str(j, "smtp_security");
+    return strcmp(v, "starttls") == 0 ? SMTP_STARTTLS : strcmp(v, "tls") == 0 || !v[0] ? SMTP_TLS : -1;
+}
+
+/* A whole number in lo..hi, or -1. */
+static int json_int(const cJSON *j, const char *k, int lo, int hi)
+{
+    const cJSON *v = cJSON_GetObjectItem(j, k);
+    if (!cJSON_IsNumber(v) || v->valuedouble != (double)(int)v->valuedouble || v->valueint < lo || v->valueint > hi) {
+        return -1;
+    }
+    return v->valueint;
+}
+
+/*
+ * POST /api/secret {smtp_host, smtp_port, smtp_security ("tls" | "starttls"),
+ * smtp_user, smtp_pass, from_name, kid_name, max_seconds, hourly_cap,
+ * bedtime_ok}: the secret message email account and limits. smtp_pass left
+ * out or empty keeps the saved password; clear_password: true erases it.
+ * Device only, no Twilio. The password is never sent back (/api/status has
+ * has_password only).
+ */
+static esp_err_t h_secret(httpd_req_t *req)
+{
+    if (!post_ok(req)) {
+        return ESP_OK;
+    }
+    cJSON *j = read_json(req);
+    if (!j) {
+        return send_msg(req, "400 Bad Request", false, "Missing, too large or bad request.");
+    }
+    cfg_secret_t *s = calloc(1, sizeof(cfg_secret_t));
+    if (!s) {
+        cJSON_Delete(j);
+        return send_msg(req, "503 Service Unavailable", false, "The phone is busy. Try again.");
+    }
+    char host[96], user[128], pass[96];
+    trim_copy(json_str(j, "smtp_host"), host, sizeof(host));
+    trim_copy(json_str(j, "smtp_user"), user, sizeof(user));
+    /* App passwords are shown in groups ("abcd efgh ijkl mnop"): spaces out. */
+    size_t pl = 0;
+    for (const char *p = json_str(j, "smtp_pass"); *p && pl + 1 < sizeof(pass); p++) {
+        if (*p != ' ') {
+            pass[pl++] = *p;
+        }
+    }
+    pass[pl] = '\0';
+    const bool clear_pass = cJSON_IsTrue(cJSON_GetObjectItem(j, "clear_password"));
+    trim_copy(json_str(j, "from_name"), s->from_name, sizeof(s->from_name));
+    trim_copy(json_str(j, "kid_name"), s->kid_name, sizeof(s->kid_name));
+    const int port = json_int(j, "smtp_port", 1, 65535);
+    const int sec = json_security(j);
+    const int max_s = json_int(j, "max_seconds", APP_SECRET_MAX_S_LO, APP_SECRET_MAX_S_HI);
+    const int cap = json_int(j, "hourly_cap", APP_SECRET_CAP_LO, APP_SECRET_CAP_HI);
+    s->bed_ok = cJSON_IsTrue(cJSON_GetObjectItem(j, "bedtime_ok"));
+    cJSON *pw = cJSON_GetObjectItem(j, "smtp_pass");
+    if (cJSON_IsString(pw)) {
+        mbedtls_platform_zeroize(pw->valuestring, strlen(pw->valuestring));
+    }
+    cJSON_Delete(j);
+
+    char e[120];
+    const char *err = NULL;
+    bool host_valid = host[0] && strlen(host) < sizeof(s->host);
+    for (const char *p = host; host_valid && *p; p++) {
+        host_valid = isalnum((unsigned char)*p) || *p == '.' || *p == '-';
+    }
+    if (host[0] && !host_valid) {
+        err = "The mail server name doesn't look right (like smtp.gmail.com).";
+    } else if (port < 0) {
+        err = "Pick a port from 1 to 65535 (465 or 587 for most providers).";
+    } else if (sec < 0) {
+        err = "Bad security setting.";
+    } else if (user[0] && !email_ok(user)) {
+        err = "The login should be your full email address.";
+    } else if (pl > 64) {
+        err = "That password is too long (64 characters at most).";
+    } else if (max_s < 0) {
+        snprintf(e, sizeof(e), "Pick a longest secret from %d to %d seconds.", APP_SECRET_MAX_S_LO, APP_SECRET_MAX_S_HI);
+        err = e;
+    } else if (cap < 0) {
+        snprintf(e, sizeof(e), "Pick %d to %d secrets per hour.", APP_SECRET_CAP_LO, APP_SECRET_CAP_HI);
+        err = e;
+    }
+    if (err) {
+        mbedtls_platform_zeroize(pass, sizeof(pass));
+        free(s);
+        return send_msg(req, "400 Bad Request", false, err);
+    }
+    strlcpy(s->host, host, sizeof(s->host));
+    strlcpy(s->user, user, sizeof(s->user));
+    strlcpy(s->pass, pass, sizeof(s->pass));
+    mbedtls_platform_zeroize(pass, sizeof(pass));
+    s->port = (uint16_t)port;
+    s->security = (uint8_t)sec;
+    s->max_s = (uint16_t)max_s;
+    s->cap_hr = (uint8_t)cap;
+    const esp_err_t r = config_set_secret(s, !s->pass[0] && !clear_pass);
+    mbedtls_platform_zeroize(s, sizeof(*s));
+    free(s);
+    if (r != ESP_OK) {
+        return send_msg(req, "500 Internal Server Error", false, "Could not save. Try again.");
+    }
+    ESP_LOGI(TAG, "secret message settings saved from the web page");
+    return send_msg(req, "200 OK", true, "Saved.");
+}
+
+/* POST /api/secret/test {}: email the login's own address with the saved
+ * settings. 202, the outcome is in /api/status secret.test. */
+static esp_err_t h_secret_test(httpd_req_t *req)
+{
+    if (!post_ok(req)) {
+        return ESP_OK;
+    }
+    char err[120];
+    if (!secret_test(err, sizeof(err))) {
+        return send_msg(req, "409 Conflict", false, err);
+    }
+    ESP_LOGI(TAG, "test email from the web page");
+    return send_msg(req, "202 Accepted", true, "Sending a test email...");
 }
 
 static esp_err_t h_hangup(httpd_req_t *req)
@@ -943,8 +1306,9 @@ static void factory_reset_task(void *arg)
 
 /*
  * POST /api/factory_reset {confirm: "RESET"}: erase everything (WiFi,
- * Twilio, numbers key, contacts, call length, bedtime) and reboot into setup. The
- * confirmation word is checked here too, not only on the page.
+ * Twilio, numbers key, contacts, call length, bedtime, pins, secret
+ * messages) and reboot into setup. The confirmation word is checked here
+ * too, not only on the page.
  */
 static esp_err_t h_factory_reset(httpd_req_t *req)
 {
@@ -998,7 +1362,7 @@ void setup_server_start(void)
     cfg.server_port = APP_HTTP_PORT;
     cfg.stack_size = APP_HTTP_STACK;
     cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 16; /* 13 registered */
+    cfg.max_uri_handlers = 18; /* 16 registered */
     cfg.lru_purge_enable = true;
     cfg.core_id = 0;
     httpd_handle_t srv = NULL;
@@ -1014,6 +1378,9 @@ void setup_server_start(void)
         {.uri = "/api/contacts", .method = HTTP_POST, .handler = h_contacts},
         {.uri = "/api/settings", .method = HTTP_POST, .handler = h_settings},
         {.uri = "/api/bedtime", .method = HTTP_POST, .handler = h_bedtime},
+        {.uri = "/api/pins", .method = HTTP_POST, .handler = h_pins},
+        {.uri = "/api/secret", .method = HTTP_POST, .handler = h_secret},
+        {.uri = "/api/secret/test", .method = HTTP_POST, .handler = h_secret_test},
         {.uri = "/api/call", .method = HTTP_POST, .handler = h_call},
         {.uri = "/api/hangup", .method = HTTP_POST, .handler = h_hangup},
         {.uri = "/api/factory_reset", .method = HTTP_POST, .handler = h_factory_reset},
@@ -1022,7 +1389,7 @@ void setup_server_start(void)
         {.uri = "/api/wifi/add", .method = HTTP_POST, .handler = h_wifi_add},
         {.uri = "/api/wifi/remove", .method = HTTP_POST, .handler = h_wifi_remove},
     };
-    _Static_assert(sizeof(uris) / sizeof(uris[0]) <= 16, "raise max_uri_handlers");
+    _Static_assert(sizeof(uris) / sizeof(uris[0]) <= 18, "raise max_uri_handlers");
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         esp_err_t e = httpd_register_uri_handler(srv, &uris[i]);
         if (e != ESP_OK) {

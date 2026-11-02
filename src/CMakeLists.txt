@@ -10,8 +10,8 @@ idf_component_register(SRCS ${app_sources}
                        EMBED_TXTFILES "setup_page.html" "${CMAKE_SOURCE_DIR}/twilio/voice.js"
                        EMBED_FILES "prompts/time_up.pcm" "prompts/unavailable.pcm" "prompts/no_answer.pcm"
                                    "prompts/no_wifi.pcm" "prompts/not_ready.pcm" "prompts/cant_call.pcm"
-                                   "prompts/sleep_time.pcm"
+                                   "prompts/sleep_time.pcm" "prompts/secret_start.pcm" "prompts/secret_sent.pcm"
                                    "${CMAKE_SOURCE_DIR}/twilio/no_answer.wav"
                        REQUIRES usb esp_timer driver g711 resampler
                                 esp_wifi esp_netif esp_event nvs_flash lwip mbedtls
-                                esp_http_client esp_http_server json esp_driver_uart esp_app_format)
+                                esp_http_client esp_http_server json esp_driver_uart esp_app_format esp-tls)

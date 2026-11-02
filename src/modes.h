@@ -12,6 +12,8 @@ typedef enum {
     MODE_BUSY,                  /* a call just failed: US busy for APP_BUSY_TONE_MS */
     MODE_NO_WIFI,               /* no WiFi: slow quiet beep */
     MODE_PROMPT,                /* a spoken prompt (prompts.h), then the idle sound again */
+    MODE_BEEP,                  /* secret message: one short beep (start, or time's up), then silence */
+    MODE_SECRET,                /* secret message: recording the mic, earpiece silent (secret.h) */
     MODE_COUNT
 } app_mode_t;
 
@@ -19,7 +21,7 @@ typedef enum {
  * and the test mode selection. Read by the audio task every block. */
 app_mode_t app_mode_get(void);
 const char *app_mode_name(app_mode_t m);
-/* Short label for logs: "A".."D", "CALL", "RING", "SETUP", "BUSY", "NOWIFI", "PROMPT". */
+/* Short label for logs: "A".."D", "CALL", "RING", "SETUP", "BUSY", "NOWIFI", "PROMPT", "BEEP", "SECRET". */
 const char *app_mode_short(app_mode_t m);
 
 /* Factory reset (main.c): stop any call, erase the config (NVS namespace and

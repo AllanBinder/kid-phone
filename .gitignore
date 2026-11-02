@@ -7,3 +7,4 @@ sdkconfig.esp32s3
 .vscode/
 src/secrets.h
 web/kid_phone.bin
+__pycache__/

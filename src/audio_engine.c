@@ -16,6 +16,7 @@
 #include "prompts.h"
 #include "resampler.h"
 #include "rtp.h"
+#include "secret.h"
 #include "usb_audio.h"
 
 static const char *TAG = "audio";
@@ -413,7 +414,20 @@ static void prompt_stop(const char *why)
 static bool is_tone_mode(app_mode_t m)
 {
     return m == MODE_C_DIAL_TONE || m == MODE_RINGBACK || m == MODE_SETUP_NEEDED || m == MODE_BUSY ||
-           m == MODE_NO_WIFI;
+           m == MODE_NO_WIFI || m == MODE_BEEP;
+}
+
+/* Secret message recording: everything the mic ring holds goes to the
+ * recorder (secret.c decimates it to 16 kHz); the earpiece stays silent. */
+static void secret_block(int16_t *out, size_t out_n)
+{
+    if (E.have_mic) {
+        size_t n;
+        while ((n = mic_ring_pop(s_blk_mic, MAX_BLOCK)) > 0) {
+            secret_audio_feed(s_blk_mic, n, E.mic.rate);
+        }
+    }
+    memset(out, 0, out_n * sizeof(int16_t));
 }
 
 /* Linear ramp over the first len samples of b (clamped to n): up from 0 to
@@ -478,6 +492,13 @@ static void render_block(app_mode_t mode, size_t out_n)
         break;
     case MODE_PROMPT:
         prompt_block(s_blk_out, out_n);
+        break;
+    case MODE_BEEP: /* one short beep, then silence until the mode changes */
+        cadence_tone(s_blk_out, out_n, E.spk.rate, APP_SECRET_BEEP_HZ, 0.0f, APP_SECRET_BEEP_AMPL,
+                     APP_SECRET_BEEP_MS, 60000);
+        break;
+    case MODE_SECRET:
+        secret_block(s_blk_out, out_n);
         break;
     case MODE_CALL:
         if (E.tel_ok) {
@@ -609,6 +630,9 @@ static void audio_task(void *arg)
             }
             usb_audio_unlock();
         }
+
+        /* Finishes a secret recording's stop (and notices a lost mic). */
+        secret_audio_tick(E.have_mic);
 
         if (!wrote) {
             /* No earpiece (or write failed): pace with a sleep instead. */

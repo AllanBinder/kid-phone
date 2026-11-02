@@ -11,10 +11,15 @@
  *   sip_pass
  *   caller_id                  the Twilio number calls come from (E.164)
  *   tw_sid                     Twilio Account SID (not a secret; prefills the page)
- *   c0_name..c3_name,          up to CFG_MAX_CONTACTS contacts (E.164 numbers);
- *   c0_num..c3_num             button i calls contact i, an empty number = unused slot
- *   c0_sch..c3_sch             blob, availability schedule per contact (see
+ *   c0_name..c23_name,         up to CFG_MAX_CONTACTS contacts (E.164 numbers);
+ *   c0_num..c23_num            button i calls contact i, an empty number = unused slot.
+ *                              Slots 0-3 use the same keys as firmware before 0.5.0;
+ *                              an empty slot has no keys at all (missing = empty)
+ *   c0_sch..c23_sch            blob, availability schedule per contact (see
  *                              sched_blob_t in config_store.c); missing = always available
+ *   pins                       blob, which GPIO is each button and light (see
+ *                              pins_blob_t in config_store.c); missing = the 0.4.x
+ *                              wiring (APP_BUTTON_GPIOS / APP_CONTACT_LED_GPIOS)
  *   provisioned                u8, 1 once Twilio setup finished
  *   tw_key_sid, tw_key_sec     restricted Twilio API key (SK... and its secret)
  *                              that can only set ALLOWED and redeploy, so a
@@ -28,6 +33,21 @@
  *                              (missing = APP_BEDTIME_START_DEFAULT / APP_BEDTIME_END_DEFAULT)
  *   home_tz, home_tz_name      the home time zone (where the child is): POSIX TZ rule and the
  *                              IANA name the page picked it from (missing = not set yet)
+ *   c0_sec..c23_sec            u8, secret message mode of slot i (CFG_SECRET_*); missing = off
+ *   c0_mail..c23_mail          where slot i's secrets are emailed; only kept while its mode
+ *                              is not off (missing = none)
+ *   smtp_host, smtp_port,      the parent's mail server for secrets: host, u16 port, u8
+ *   smtp_sec                   security (SMTP_TLS = 0, SMTP_STARTTLS = 1, see smtp.h)
+ *   smtp_user, smtp_pass       login (an email address, also the From address) and app
+ *                              password; the password is never sent back to the page
+ *   smtp_from                  display name on the email ("Kid Phone" if missing)
+ *   kid_name                   the child's name, used in the subject (missing = none)
+ *   sec_max_s                  u16, longest secret in seconds (missing = APP_SECRET_MAX_S_DEFAULT)
+ *   sec_cap_hr                 u8, secrets allowed per hour (missing = APP_SECRET_CAP_DEFAULT)
+ *   sec_bed                    u8, 1 = secrets allowed at bedtime (missing = no)
+ * Every secret key is optional: a phone set up before 0.6.0 has none, and
+ * missing keys mean the feature is off. Empty values are erased, not written
+ * (24 slots of empty keys would fill the small NVS partition).
  *
  * The Twilio Auth Token is never stored. An optional src/secrets.h (developer
  * override) seeds empty NVS at boot so a bench board keeps working.
@@ -41,7 +61,10 @@
 
 #include "esp_err.h"
 
-#define CFG_MAX_CONTACTS 4
+#include "app_config.h"
+
+/* One contact per button, and every assignable GPIO can be a button. */
+#define CFG_MAX_CONTACTS APP_NUM_ASSIGNABLE
 #define CFG_MAX_WINDOWS  4
 #define CFG_MAX_WIFI     5
 
@@ -88,11 +111,50 @@ typedef struct {
     char tz_name[40];   /* IANA name the page picked it from, for display only */
 } cfg_bedtime_t;
 
+/* Secret message mode of a slot (NVS c<i>_sec). */
+#define CFG_SECRET_OFF       0 /* the button only calls (acts on press, as before 0.6.0) */
+#define CFG_SECRET_HOLD      1 /* short press calls (on release), a long press records a secret */
+#define CFG_SECRET_DEDICATED 2 /* a press records a secret; no number, never calls */
+
 typedef struct {
     char name[32];
-    char number[20]; /* E.164, "+" and up to 15 digits; "" = unused slot */
+    char number[20]; /* E.164, "+" and up to 15 digits; "" = no number (unused, or a dedicated secret button) */
     cfg_schedule_t sched;
+    uint8_t secret;  /* CFG_SECRET_*; not off only with an email */
+    char email[64];  /* where this slot's secrets go; "" with secret off */
 } cfg_contact_t;
+
+/* Secret messages, phone-wide: the parent's own mail account and the limits.
+ * configured = host, user and password all set (config_secret_opts). */
+typedef struct {
+    char host[64];
+    uint16_t port;
+    uint8_t security;   /* SMTP_TLS (0, implicit TLS) or SMTP_STARTTLS (1), see smtp.h */
+    char user[96];      /* login, an email address; also the From address */
+    char pass[72];      /* app password; never leaves the phone */
+    char from_name[48]; /* display name on the email, "" = APP_SECRET_FROM_DEFAULT */
+    char kid_name[32];  /* in the subject, "" = none */
+    uint16_t max_s;     /* APP_SECRET_MAX_S_LO..APP_SECRET_MAX_S_HI */
+    uint8_t cap_hr;     /* APP_SECRET_CAP_LO..APP_SECRET_CAP_HI */
+    bool bed_ok;        /* secrets allowed during bedtime */
+} cfg_secret_t;
+
+/* The parts of cfg_secret_t the buttons and lights need, without the login. */
+typedef struct {
+    bool configured;
+    bool bed_ok;
+    uint8_t cap_hr;
+    uint16_t max_s;
+} cfg_secret_opts_t;
+
+/* Which GPIO is each button and its light. Buttons fill slots 0..count-1
+ * (slot i = button i = contact i); lamp[i] = -1 for a button with no light.
+ * Every pin is in APP_ASSIGNABLE_GPIOS and used once (pins_validate). */
+typedef struct {
+    uint8_t count;                    /* 1..CFG_MAX_CONTACTS buttons */
+    int8_t button[CFG_MAX_CONTACTS];  /* GPIO, -1 from count on */
+    int8_t lamp[CFG_MAX_CONTACTS];    /* GPIO or -1 (no light) */
+} cfg_pins_t;
 
 typedef struct {
     char sip_domain[96];
@@ -111,6 +173,8 @@ typedef struct {
     uint8_t call_program;  /* tw_prog: APP_TW_PROGRAM_VERSION last deployed, 0 = unknown */
     uint16_t max_call_min; /* APP_CALL_MAX_MIN_LO..APP_CALL_MAX_MIN_HI */
     cfg_bedtime_t bedtime;
+    cfg_pins_t pins;
+    cfg_secret_t secret;
 } app_cfg_t;
 
 /* Init NVS flash, load the namespace, seed from secrets.h if present and
@@ -119,7 +183,8 @@ void config_store_init(void);
 
 /* Copy the whole config (WiFi networks are kept apart, see config_wifi_*).
  * Contains secrets: wipe the copy when done if it held the SIP password or
- * the key secret (config_wipe). */
+ * the key secret (config_wipe). It is several KB: keep it on the heap, not
+ * on a task stack. */
 void config_get(app_cfg_t *out);
 void config_wipe(app_cfg_t *c);
 
@@ -194,9 +259,33 @@ esp_err_t config_set_max_call_minutes(unsigned minutes);
 void config_get_bedtime(cfg_bedtime_t *out);
 esp_err_t config_set_bedtime(const cfg_bedtime_t *b);
 
+/* The button and light pins (defaults if none saved), and saving them. The
+ * caller validates first (pins_validate). ESP_ERR_INVALID_STATE (nothing
+ * saved) if a slot that would lose its button still has a number (its
+ * contact would be unreachable but still allowed in Twilio) or a secret
+ * mode. *slot (may be NULL) is then that slot. */
+void config_get_pins(cfg_pins_t *out);
+esp_err_t config_set_pins(const cfg_pins_t *pins, int *slot);
+
 /* True if at least one contact slot has a number. */
 bool config_any_contact(const cfg_contact_t *contacts);
 
-/* Erase the whole namespace (all WiFi networks, Twilio, Twilio key, contacts, call length, bedtime).
+/* True if at least one slot is a dedicated secret button. */
+bool config_any_dedicated(const cfg_contact_t *contacts);
+
+/* Secret messages: the whole setting with the password (wipe the copy when
+ * done, mbedtls_platform_zeroize), the parts without it, and saving it
+ * (keep_pass: leave the stored password as it is and ignore s->pass). The
+ * caller validates first. */
+void config_get_secret(cfg_secret_t *out);
+void config_secret_opts(cfg_secret_opts_t *out);
+esp_err_t config_set_secret(const cfg_secret_t *s, bool keep_pass);
+
+/* Secret mode of slot idx (CFG_SECRET_*), and its email into email (may be
+ * NULL). Cheap: no whole-contact copy. */
+uint8_t config_slot_secret(int idx, char *email, size_t len);
+
+/* Erase the whole namespace (all WiFi networks, Twilio, Twilio key, contacts, call length, bedtime,
+ * pins, secret messages).
  * Caller reboots. */
 esp_err_t config_factory_reset(void);

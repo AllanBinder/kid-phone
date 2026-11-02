@@ -4,8 +4,9 @@
  * ESP32-S3 is USB host (native port, GPIO 19/20) to a USB-C telephone
  * handset, and a SIP client over WiFi to a Twilio SIP Domain. Setup needs no
  * toolchain: WiFi over Improv Serial (browser flasher), then Twilio from the
- * phone's own web page (http://kidphone.local/). Up to four contact buttons
- * (APP_BUTTON_GPIOS) with one LED each (APP_CONTACT_LED_GPIOS):
+ * phone's own web page (http://kidphone.local/). Up to CFG_MAX_CONTACTS contact
+ * buttons, each with an optional LED, on pins the parent picks on the setup
+ * page (pins.h; with none saved, buttons on GPIO 4-7 and lights on 15-18):
  *   idle, press i             call contact i (a spoken prompt, then a short
  *                             busy tone, if it is bedtime, the slot is empty
  *                             or the contact is outside their available hours)
@@ -14,6 +15,13 @@
  *   fails, presses are ignored (button mashing)
  * A contact button acts once, on the press edge. Holding it does nothing
  * more and never repeats; the next action needs a release and a new press.
+ * Secret messages (secret.h) change that per button, as the parent picks:
+ *   long press                idle: a press shorter than APP_SECRET_HOLD_MS
+ *                             calls on the release; holding it that long
+ *                             starts a secret for that contact
+ *   dedicated                 idle: a press starts a secret (no number)
+ *   while recording           a press of the same button stops it
+ * In a call every button still hangs up on the press edge.
  * The board's BOOT button (APP_BOOT_GPIO, out of a child's reach):
  *   idle, short press         cycle the stage 1 audio test modes A-D
  *   hold 10 s                 factory reset (erase config, reboot into setup);
@@ -38,9 +46,11 @@
 #include "improv.h"
 #include "contact_leds.h"
 #include "modes.h"
+#include "pins.h"
 #include "prompts.h"
 #include "rtp.h"
 #include "schedule.h"
+#include "secret.h"
 #include "setup_server.h"
 #include "sip.h"
 #include "status_led.h"
@@ -78,6 +88,10 @@ app_mode_t app_mode_get(void)
     }
     if (prompt_active()) {
         return MODE_PROMPT;
+    }
+    const int sm = secret_audio_mode();
+    if (sm >= 0) {
+        return (app_mode_t)sm;
     }
     int t = atomic_load(&s_test_mode);
     if (t >= 0) {
@@ -118,13 +132,15 @@ const char *app_mode_name(app_mode_t m)
     case MODE_BUSY: return "busy (480 + 620 Hz, 500/500 ms)";
     case MODE_NO_WIFI: return "no WiFi (slow beep)";
     case MODE_PROMPT: return "spoken prompt";
+    case MODE_BEEP: return "secret message beep";
+    case MODE_SECRET: return "secret message recording (mic -> PSRAM)";
     default: return "?";
     }
 }
 
 const char *app_mode_short(app_mode_t m)
 {
-    static const char *k[] = {"A", "B", "C", "D", "CALL", "RING", "SETUP", "BUSY", "NOWIFI", "PROMPT"};
+    static const char *k[] = {"A", "B", "C", "D", "CALL", "RING", "SETUP", "BUSY", "NOWIFI", "PROMPT", "BEEP", "SECRET"};
     _Static_assert(sizeof(k) / sizeof(k[0]) == MODE_COUNT, "mode names out of sync");
     return (unsigned)m < MODE_COUNT ? k[m] : "?";
 }
@@ -195,14 +211,24 @@ static void check_call_result(uint32_t *seen)
     }
 }
 
-static void on_press_idle(int idx)
+/* Presses ignored while a prompt plays and during the cooldown (calls and
+ * secrets alike). */
+static bool press_blocked(int idx)
 {
     if (prompt_active()) {
         ESP_LOGI(TAG, "BUTTON %d: ignored, prompt playing", idx);
-        return;
+        return true;
     }
     if (now_ms() < atomic_load(&s_cooldown_until_ms)) {
-        ESP_LOGI(TAG, "BUTTON %d: ignored, cooldown after the last call", idx);
+        ESP_LOGI(TAG, "BUTTON %d: ignored, cooldown after the last call or secret", idx);
+        return true;
+    }
+    return false;
+}
+
+static void on_press_idle(int idx)
+{
+    if (press_blocked(idx)) {
         return;
     }
     /* Bedtime first: whatever else is wrong, the child only needs to hear
@@ -246,6 +272,51 @@ static void on_press_idle(int idx)
     atomic_store(&s_test_mode, -1); /* back to the normal idle sound after the call */
     atomic_store(&s_busy_until_ms, 0);
     sip_call_contact(idx);
+}
+
+/* Start a secret message on slot idx (a dedicated button's press, or a
+ * long-press button held long enough). Bedtime first, as for calls, unless
+ * the parent allows secrets then. */
+static void on_secret_idle(int idx)
+{
+    if (press_blocked(idx)) {
+        return;
+    }
+    cfg_secret_opts_t o;
+    config_secret_opts(&o);
+    if (!o.bed_ok) {
+        cfg_bedtime_t bed;
+        bedtime_state_t bst;
+        config_get_bedtime(&bed);
+        schedule_bedtime_eval(&bed, &bst);
+        if (bst.active) {
+            ESP_LOGI(TAG, "BUTTON %d: secret at bedtime, busy tone", idx);
+            feedback(PROMPT_SLEEP_TIME, APP_SHORT_BUSY_MS);
+            return;
+        }
+    }
+    atomic_store(&s_test_mode, -1);
+    atomic_store(&s_busy_until_ms, 0);
+    const secret_begin_t r = secret_begin(idx);
+    switch (r) {
+    case SECRET_STARTED:
+        ESP_LOGI(TAG, "BUTTON %d: secret message", idx);
+        break;
+    case SECRET_NO_WIFI:
+        ESP_LOGW(TAG, "BUTTON %d: no WiFi, no secret", idx);
+        feedback(PROMPT_NO_WIFI, 0);
+        break;
+    case SECRET_NOT_SET_UP:
+        ESP_LOGW(TAG, "BUTTON %d: secret messages not set up (email), open http://%s.local/", idx, APP_HOSTNAME);
+        feedback(PROMPT_NOT_READY, APP_SHORT_BUSY_MS);
+        break;
+    default:
+        /* Over the hourly cap, one still waiting to be sent, no handset, no
+         * memory: the busy tone only. */
+        ESP_LOGI(TAG, "BUTTON %d: no secret now (%d), busy tone", idx, (int)r);
+        feedback(PROMPT_NONE, APP_SHORT_BUSY_MS);
+        break;
+    }
 }
 
 /* Stop any call and erase the config (NVS namespace plus the WiFi driver's
@@ -302,19 +373,50 @@ static int button_debounce(button_t *b)
 }
 
 /*
- * Contact buttons: one action per press, on the press edge. Idle: call that
- * contact (subject to the prompt / cooldown / schedule rules). In a call:
- * hang up. Holding does nothing more, and a held button never repeats: the
- * next action needs a release and a new press.
+ * Contact buttons. Secret mode off (the default, and every phone before
+ * 0.6.0): one action per press, on the press edge. Idle: call that contact
+ * (subject to the prompt / cooldown / schedule rules). In a call: hang up.
+ * Holding does nothing more, and a held button never repeats: the next
+ * action needs a release and a new press.
+ *
+ * Secret mode dedicated: idle, a press starts a secret. Long press: idle,
+ * the press only arms the button; released before APP_SECRET_HOLD_MS it
+ * calls, held that long it starts a secret (and the release then does
+ * nothing). In every mode a press during a call hangs up, and a press while
+ * a secret is going goes to secret_press() (stops the recording on its own
+ * button, ignored on the others).
  */
-static void contact_button_poll(int idx, button_t *b)
+static void contact_button_poll(int idx, button_t *b, uint8_t mode, bool *armed)
 {
-    if (button_debounce(b) != 1) {
+    const int edge = button_debounce(b);
+    if (edge == -1) {
+        if (*armed) {
+            *armed = false;
+            if (sip_call_state() == CALL_IDLE && !secret_active()) {
+                on_press_idle(idx); /* long-press button, short press: call */
+            }
+        }
         return;
     }
+    if (edge != 1) {
+        if (*armed && b->stable == 0 && b->held_ms >= APP_SECRET_HOLD_MS) {
+            *armed = false;
+            if (sip_call_state() == CALL_IDLE && !secret_active()) {
+                on_secret_idle(idx);
+            }
+        }
+        return;
+    }
+    *armed = false;
     if (sip_call_state() != CALL_IDLE) {
         ESP_LOGI(TAG, "BUTTON %d: hang up (state %s)", idx, sip_call_state_name(sip_call_state()));
         sip_call_hangup();
+    } else if (secret_active()) {
+        secret_press(idx);
+    } else if (mode == CFG_SECRET_DEDICATED) {
+        on_secret_idle(idx);
+    } else if (mode == CFG_SECRET_HOLD) {
+        *armed = true; /* decided on the release or at the hold time */
     } else {
         on_press_idle(idx);
     }
@@ -355,24 +457,42 @@ static void boot_button_poll(button_t *b)
     esp_restart();
 }
 
+/* Contact buttons from the pins pins_apply() made live; slots whose button
+ * pin changed (bit i of changed) start over. At boot they start released, as
+ * before 0.5.0. A pin changed live starts from the level it reads now, so a
+ * new pin that reads low (a button already held, a wiring mistake) needs a
+ * release and a new press before it calls. */
+static void load_buttons(button_t *btn, int *count, uint32_t changed, bool live)
+{
+    cfg_pins_t p;
+    pins_applied(&p);
+    for (int i = 0; i < CFG_MAX_CONTACTS; i++) {
+        if (i >= p.count) {
+            btn[i] = (button_t){.gpio = -1, .stable = 1, .last_raw = 1};
+        } else if ((changed >> i) & 1) {
+            const int level = live ? (gpio_get_level(p.button[i]) ? 1 : 0) : 1;
+            btn[i] = (button_t){.gpio = p.button[i], .stable = level, .last_raw = level};
+        }
+    }
+    *count = p.count;
+}
+
 static void button_task(void *arg)
 {
     (void)arg;
-    static const int gpios[APP_NUM_BUTTONS] = APP_BUTTON_GPIOS;
-    button_t btn[APP_NUM_BUTTONS];
-    uint64_t mask = 0;
-    for (int i = 0; i < APP_NUM_BUTTONS; i++) {
-        btn[i] = (button_t){.gpio = gpios[i], .stable = 1, .last_raw = 1};
-        mask |= 1ULL << gpios[i];
+    /* Slots up to CFG_MAX_CONTACTS: static, not on this small stack. */
+    static button_t btn[CFG_MAX_CONTACTS];
+    /* Secret mode per slot (config_slot_secret, reread on every config
+     * change) and whether a long-press button is waiting for its release. */
+    static uint8_t sec_mode[CFG_MAX_CONTACTS];
+    static bool armed[CFG_MAX_CONTACTS];
+    int nbtn = 0;
+    load_buttons(btn, &nbtn, UINT32_MAX, false);
+    for (int i = 0; i < CFG_MAX_CONTACTS; i++) {
+        sec_mode[i] = config_slot_secret(i, NULL, 0);
     }
-    const gpio_config_t cfg = {
-        .pin_bit_mask = mask,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    ESP_ERROR_CHECK(gpio_config(&cfg));
+    uint32_t pins_gen = config_generation();
+    int gen_poll = 0;
     /* BOOT: input only, never driven. The board has its own pull-up; the
      * internal one is the same direction and harmless. */
     const gpio_config_t boot_cfg = {
@@ -387,8 +507,39 @@ static void button_task(void *arg)
     uint32_t result_seen = sip_result_seq();
     while (1) {
         check_call_result(&result_seen);
-        for (int i = 0; i < APP_NUM_BUTTONS; i++) {
-            contact_button_poll(i, &btn[i]);
+        /* Pins saved on the setup page: apply them live, every 100 ms at most. */
+        if (++gen_poll >= 100 / APP_BUTTON_POLL_MS) {
+            gen_poll = 0;
+            const uint32_t g = config_generation();
+            if (g != pins_gen) {
+                pins_gen = g;
+                cfg_pins_t want, live;
+                config_get_pins(&want);
+                pins_applied(&live);
+                if (memcmp(&want, &live, sizeof(want)) != 0) {
+                    ESP_LOGI(TAG, "pins changed on the setup page: applying");
+                    const uint32_t changed = pins_apply(&want);
+                    load_buttons(btn, &nbtn, changed, true);
+                    for (int i = 0; i < CFG_MAX_CONTACTS; i++) {
+                        if ((changed >> i) & 1) {
+                            armed[i] = false; /* that button starts over */
+                        }
+                    }
+                }
+                for (int i = 0; i < CFG_MAX_CONTACTS; i++) {
+                    const uint8_t m = config_slot_secret(i, NULL, 0);
+                    if (m != sec_mode[i]) {
+                        sec_mode[i] = m;
+                        armed[i] = false; /* a mode change mid-press: that press does nothing */
+                    }
+                }
+            }
+        }
+        if (secret_poll()) {
+            atomic_store(&s_cooldown_until_ms, now_ms() + APP_PRESS_COOLDOWN_MS);
+        }
+        for (int i = 0; i < nbtn; i++) {
+            contact_button_poll(i, &btn[i], sec_mode[i], &armed[i]);
         }
         boot_button_poll(&boot);
         vTaskDelay(pdMS_TO_TICKS(APP_BUTTON_POLL_MS));
@@ -397,15 +548,21 @@ static void button_task(void *arg)
 
 void app_main(void)
 {
-    static const int gpios[APP_NUM_BUTTONS] = APP_BUTTON_GPIOS;
     ESP_LOGI(TAG, "kid_phone: button i calls contact i");
-    ESP_LOGI(TAG, "Buttons on GPIO %d, %d, %d, %d (to GND): press = call / hang up, holding does nothing", gpios[0],
-             gpios[1], gpios[2], gpios[3]);
+    ESP_LOGI(TAG, "Buttons (to GND): press = call / hang up, holding does nothing (secret message buttons: "
+                  "hold %d ms or press a dedicated one = record, press again = stop)", APP_SECRET_HOLD_MS);
     ESP_LOGI(TAG, "BOOT (GPIO %d): short press while idle = cycle test modes A-D, hold %d ms = factory reset",
              APP_BOOT_GPIO, APP_FACTORY_RESET_MS);
 
     config_store_init();
+    /* Buttons and lights as saved (or the default wiring), before any task
+     * reads them. Later changes are applied by the button task. */
+    cfg_pins_t pins;
+    config_get_pins(&pins);
+    pins_apply(&pins);
     wifi_start();
+    /* Before the setup page and the lights, which both ask it for state. */
+    secret_start();
     improv_start();
     setup_server_start();
     status_led_start();
@@ -414,5 +571,6 @@ void app_main(void)
     sip_start();
     usb_audio_start();
     audio_engine_start();
-    xTaskCreatePinnedToCore(button_task, "button", 3072, NULL, 3, NULL, 0);
+    /* 4 KB: the secret steps (secret_begin, the queueing) run on it too. */
+    xTaskCreatePinnedToCore(button_task, "button", 4096, NULL, 3, NULL, 0);
 }

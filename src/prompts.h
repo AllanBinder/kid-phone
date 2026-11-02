@@ -25,6 +25,8 @@ typedef enum {
     PROMPT_NOT_READY,   /* "This phone isn't ready yet. Ask a grown-up for help." */
     PROMPT_CANT_CALL,   /* "Oops, that call didn't work. Let's get a grown-up to help." */
     PROMPT_SLEEP_TIME,  /* "It's sleep time. You can call in the morning." */
+    PROMPT_SECRET_START, /* "Tell your secret after the beep!" */
+    PROMPT_SECRET_SENT,  /* "Shh! Your secret is on its way." */
     PROMPT_COUNT
 } prompt_id_t;
 

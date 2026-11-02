@@ -8,6 +8,9 @@
  *
  * Spoken prompts (prompts.h) are 16 kHz clips in flash, upsampled block by
  * block with their own interpolator, so they never stall the loop.
+ *
+ * Secret messages (secret.h): MODE_SECRET hands the mic ring to the
+ * recorder instead of the earpiece, and MODE_BEEP is its beep.
  */
 #pragma once
 

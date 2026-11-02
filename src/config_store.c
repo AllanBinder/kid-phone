@@ -10,6 +10,7 @@
 #include "nvs_flash.h"
 
 #include "app_config.h"
+#include "pins.h"
 
 /* Optional developer override (gitignored). The build works without it. */
 #if __has_include("secrets.h")
@@ -44,6 +45,21 @@ typedef struct __attribute__((packed)) {
     } win[CFG_MAX_WINDOWS];
 } sched_blob_t;
 _Static_assert(sizeof(sched_blob_t) == 111, "schedule blob layout changed: bump SCHED_BLOB_VERSION");
+
+/* Stored pins (NVS blob "pins"), same rules: a blob with an unknown version
+ * or size, or one that fails pins_validate, is ignored and the phone uses
+ * the 0.4.x wiring (pins_defaults). Up to 32 slots fit this version, so a
+ * later firmware with a larger CFG_MAX_CONTACTS still reads it. */
+#define PINS_BLOB_VERSION 1
+#define PINS_BLOB_SLOTS   32
+typedef struct __attribute__((packed)) {
+    uint8_t version;
+    uint8_t count;
+    int8_t button[PINS_BLOB_SLOTS];
+    int8_t lamp[PINS_BLOB_SLOTS];
+} pins_blob_t;
+_Static_assert(sizeof(pins_blob_t) == 66, "pins blob layout changed: bump PINS_BLOB_VERSION");
+_Static_assert(CFG_MAX_CONTACTS <= PINS_BLOB_SLOTS, "pins blob too small for CFG_MAX_CONTACTS");
 
 static void lock(void)
 {
@@ -106,20 +122,70 @@ static void load_sched(nvs_handle_t h, int idx, cfg_schedule_t *out)
     }
 }
 
-/* Write names, numbers and schedules of all slots (caller holds the lock). */
+static void load_pins(nvs_handle_t h, cfg_pins_t *out)
+{
+    pins_defaults(out);
+    pins_blob_t b;
+    size_t n = sizeof(b);
+    if (nvs_get_blob(h, "pins", &b, &n) != ESP_OK) {
+        return; /* never saved: the 0.4.x wiring */
+    }
+    cfg_pins_t p;
+    memset(&p, 0, sizeof(p));
+    if (n != sizeof(b) || b.version != PINS_BLOB_VERSION || b.count > CFG_MAX_CONTACTS) {
+        ESP_LOGW(TAG, "saved pins unreadable (version %u, %u bytes): using the default wiring", b.version,
+                 (unsigned)n);
+        return;
+    }
+    p.count = b.count;
+    memcpy(p.button, b.button, sizeof(p.button));
+    memcpy(p.lamp, b.lamp, sizeof(p.lamp));
+    char why[96];
+    if (pins_validate(&p, why, sizeof(why))) {
+        ESP_LOGW(TAG, "saved pins not usable (%s): using the default wiring", why);
+        return;
+    }
+    *out = p;
+}
+
+/* Erase one key, missing is fine. */
+static esp_err_t erase_key(nvs_handle_t h, const char *key)
+{
+    esp_err_t err = nvs_erase_key(h, key);
+    return err == ESP_ERR_NVS_NOT_FOUND ? ESP_OK : err;
+}
+
+/*
+ * Write names, numbers and schedules of all slots (caller holds the lock).
+ * A key whose value is empty (no name, no number, schedule off with no
+ * times) is erased instead of written: it loads back the same (missing =
+ * empty), also in firmware before 0.5.0, and CFG_MAX_CONTACTS slots of
+ * empty keys would fill the small NVS partition.
+ */
 static esp_err_t save_contacts_locked(nvs_handle_t h)
 {
     esp_err_t err = ESP_OK;
     for (int i = 0; i < CFG_MAX_CONTACTS; i++) {
+        const cfg_contact_t *c = &s_cfg.contacts[i];
         char k[12];
         snprintf(k, sizeof(k), "c%d_name", i);
-        err |= nvs_set_str(h, k, s_cfg.contacts[i].name);
+        err |= c->name[0] ? nvs_set_str(h, k, c->name) : erase_key(h, k);
         snprintf(k, sizeof(k), "c%d_num", i);
-        err |= nvs_set_str(h, k, s_cfg.contacts[i].number);
+        err |= c->number[0] ? nvs_set_str(h, k, c->number) : erase_key(h, k);
         snprintf(k, sizeof(k), "c%d_sch", i);
-        sched_blob_t b;
-        sched_to_blob(&s_cfg.contacts[i].sched, &b);
-        err |= nvs_set_blob(h, k, &b, sizeof(b));
+        if (c->sched.enabled || c->sched.nwin || c->sched.tz[0]) {
+            sched_blob_t b;
+            sched_to_blob(&c->sched, &b);
+            err |= nvs_set_blob(h, k, &b, sizeof(b));
+        } else {
+            err |= erase_key(h, k);
+        }
+        /* Secrets: mode and email only while the mode is not off. */
+        const bool sec = c->secret != CFG_SECRET_OFF && c->email[0];
+        snprintf(k, sizeof(k), "c%d_sec", i);
+        err |= sec ? nvs_set_u8(h, k, c->secret) : erase_key(h, k);
+        snprintf(k, sizeof(k), "c%d_mail", i);
+        err |= sec ? nvs_set_str(h, k, c->email) : erase_key(h, k);
     }
     return err;
 }
@@ -134,6 +200,53 @@ bool config_any_contact(const cfg_contact_t *contacts)
     return false;
 }
 
+bool config_any_dedicated(const cfg_contact_t *contacts)
+{
+    for (int i = 0; i < CFG_MAX_CONTACTS; i++) {
+        if (contacts[i].secret == CFG_SECRET_DEDICATED) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void secret_defaults(cfg_secret_t *s)
+{
+    memset(s, 0, sizeof(*s));
+    s->port = APP_SMTP_PORT_TLS;
+    s->security = 0; /* SMTP_TLS */
+    s->max_s = APP_SECRET_MAX_S_DEFAULT;
+    s->cap_hr = APP_SECRET_CAP_DEFAULT;
+}
+
+/* Secret settings: every key optional (firmware before 0.6.0 wrote none). */
+static void load_secret(nvs_handle_t h, cfg_secret_t *s)
+{
+    secret_defaults(s);
+    get_str(h, "smtp_host", s->host, sizeof(s->host));
+    uint16_t v16 = 0;
+    if (nvs_get_u16(h, "smtp_port", &v16) == ESP_OK && v16) {
+        s->port = v16;
+    }
+    uint8_t v8 = 0;
+    if (nvs_get_u8(h, "smtp_sec", &v8) == ESP_OK && v8 <= 1) {
+        s->security = v8;
+    }
+    get_str(h, "smtp_user", s->user, sizeof(s->user));
+    get_str(h, "smtp_pass", s->pass, sizeof(s->pass));
+    get_str(h, "smtp_from", s->from_name, sizeof(s->from_name));
+    get_str(h, "kid_name", s->kid_name, sizeof(s->kid_name));
+    if (nvs_get_u16(h, "sec_max_s", &v16) == ESP_OK && v16 >= APP_SECRET_MAX_S_LO && v16 <= APP_SECRET_MAX_S_HI) {
+        s->max_s = v16;
+    }
+    if (nvs_get_u8(h, "sec_cap_hr", &v8) == ESP_OK && v8 >= APP_SECRET_CAP_LO && v8 <= APP_SECRET_CAP_HI) {
+        s->cap_hr = v8;
+    }
+    v8 = 0;
+    nvs_get_u8(h, "sec_bed", &v8);
+    s->bed_ok = v8 == 1;
+}
+
 static void load(void)
 {
     memset(&s_cfg, 0, sizeof(s_cfg));
@@ -142,6 +255,8 @@ static void load(void)
     s_cfg.max_call_min = APP_CALL_MAX_MIN_DEFAULT;
     s_cfg.bedtime.start_min = APP_BEDTIME_START_DEFAULT;
     s_cfg.bedtime.end_min = APP_BEDTIME_END_DEFAULT;
+    pins_defaults(&s_cfg.pins);
+    secret_defaults(&s_cfg.secret);
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) {
         return; /* namespace does not exist yet: empty config */
@@ -174,6 +289,16 @@ static void load(void)
         snprintf(k, sizeof(k), "c%d_num", i);
         get_str(h, k, s_cfg.contacts[i].number, sizeof(s_cfg.contacts[i].number));
         load_sched(h, i, &s_cfg.contacts[i].sched);
+        uint8_t sec = CFG_SECRET_OFF;
+        snprintf(k, sizeof(k), "c%d_sec", i);
+        nvs_get_u8(h, k, &sec);
+        snprintf(k, sizeof(k), "c%d_mail", i);
+        get_str(h, k, s_cfg.contacts[i].email, sizeof(s_cfg.contacts[i].email));
+        /* A mode with no email, or one this firmware does not know, is off. */
+        s_cfg.contacts[i].secret = sec <= CFG_SECRET_DEDICATED && s_cfg.contacts[i].email[0] ? sec : CFG_SECRET_OFF;
+        if (s_cfg.contacts[i].secret == CFG_SECRET_OFF) {
+            s_cfg.contacts[i].email[0] = '\0';
+        }
     }
     get_str(h, "tw_key_sid", s_cfg.key_sid, sizeof(s_cfg.key_sid));
     get_str(h, "tw_key_sec", s_cfg.key_secret, sizeof(s_cfg.key_secret));
@@ -197,6 +322,8 @@ static void load(void)
     }
     get_str(h, "home_tz", s_cfg.bedtime.tz, sizeof(s_cfg.bedtime.tz));
     get_str(h, "home_tz_name", s_cfg.bedtime.tz_name, sizeof(s_cfg.bedtime.tz_name));
+    load_pins(h, &s_cfg.pins);
+    load_secret(h, &s_cfg.secret);
     uint8_t p = 0;
     nvs_get_u8(h, "provisioned", &p);
     /* Only trust the flag if the SIP account and a contact are really there. */
@@ -460,7 +587,8 @@ static void seed_from_secrets(void)
 #else
         const char *cid = "";
 #endif
-        cfg_contact_t all[CFG_MAX_CONTACTS] = {c};
+        static cfg_contact_t all[CFG_MAX_CONTACTS]; /* several KB: not on the main task stack */
+        all[0] = c;
         config_set_twilio("", SIP_DOMAIN, SIP_USER, SIP_PASSWORD, cid, all);
     }
 #endif
@@ -494,6 +622,13 @@ void config_store_init(void)
                      s_cfg.contacts[i].sched.enabled ? "on" : "off (always available)");
         }
     }
+    ESP_LOGI(TAG, "pins: %u button%s", s_cfg.pins.count, s_cfg.pins.count == 1 ? "" : "s");
+    int nsec = 0;
+    for (int i = 0; i < CFG_MAX_CONTACTS; i++) {
+        nsec += s_cfg.contacts[i].secret != CFG_SECRET_OFF;
+    }
+    ESP_LOGI(TAG, "secret messages: email %s, %d button%s", s_cfg.secret.host[0] && s_cfg.secret.user[0] &&
+             s_cfg.secret.pass[0] ? "set up" : "not set up", nsec, nsec == 1 ? "" : "s");
     if (s_cfg.bedtime.enabled) {
         ESP_LOGI(TAG, "bedtime: %02u:%02u to %02u:%02u, home time zone \"%s\"", s_cfg.bedtime.start_min / 60u,
                  s_cfg.bedtime.start_min % 60u, s_cfg.bedtime.end_min / 60u, s_cfg.bedtime.end_min % 60u,
@@ -635,11 +770,7 @@ esp_err_t config_set_contacts(const cfg_contact_t *contacts)
 /* Set (non-empty) or erase (empty) one string key. */
 static esp_err_t put_str(nvs_handle_t h, const char *key, const char *val)
 {
-    if (val[0]) {
-        return nvs_set_str(h, key, val);
-    }
-    esp_err_t err = nvs_erase_key(h, key);
-    return err == ESP_ERR_NVS_NOT_FOUND ? ESP_OK : err;
+    return val[0] ? nvs_set_str(h, key, val) : erase_key(h, key);
 }
 
 esp_err_t config_set_twilio_key(const char *key_sid, const char *key_secret, const char *svc_sid,
@@ -773,6 +904,140 @@ esp_err_t config_set_bedtime(const cfg_bedtime_t *b)
     return ESP_OK;
 }
 
+void config_get_pins(cfg_pins_t *out)
+{
+    lock();
+    *out = s_cfg.pins;
+    unlock();
+}
+
+esp_err_t config_set_pins(const cfg_pins_t *pins, int *slot)
+{
+    if (pins->count < 1 || pins->count > CFG_MAX_CONTACTS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    pins_blob_t b;
+    memset(&b, -1, sizeof(b));
+    b.version = PINS_BLOB_VERSION;
+    b.count = pins->count;
+    memcpy(b.button, pins->button, sizeof(pins->button));
+    memcpy(b.lamp, pins->lamp, sizeof(pins->lamp));
+    lock();
+    /* A slot that loses its button must not still call someone or keep a
+     * secret mode (checked under the lock, against the contacts as saved
+     * right now). */
+    for (int i = pins->count; i < CFG_MAX_CONTACTS; i++) {
+        if (s_cfg.contacts[i].number[0] || s_cfg.contacts[i].secret != CFG_SECRET_OFF) {
+            if (slot) {
+                *slot = i;
+            }
+            unlock();
+            nvs_close(h);
+            return ESP_ERR_INVALID_STATE;
+        }
+    }
+    err = nvs_set_blob(h, "pins", &b, sizeof(b));
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    if (err == ESP_OK) {
+        s_cfg.pins = *pins;
+    }
+    s_gen++;
+    unlock();
+    nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "saving pins failed: %s", esp_err_to_name(err));
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+void config_get_secret(cfg_secret_t *out)
+{
+    lock();
+    *out = s_cfg.secret;
+    unlock();
+}
+
+void config_secret_opts(cfg_secret_opts_t *out)
+{
+    lock();
+    const cfg_secret_t *s = &s_cfg.secret;
+    out->configured = s->host[0] && s->user[0] && s->pass[0];
+    out->bed_ok = s->bed_ok;
+    out->cap_hr = s->cap_hr;
+    out->max_s = s->max_s;
+    unlock();
+}
+
+esp_err_t config_set_secret(const cfg_secret_t *in, bool keep_pass)
+{
+    if (in->max_s < APP_SECRET_MAX_S_LO || in->max_s > APP_SECRET_MAX_S_HI || in->cap_hr < APP_SECRET_CAP_LO ||
+        in->cap_hr > APP_SECRET_CAP_HI || in->security > 1 || !in->port) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    cfg_secret_t ns = *in;
+    lock();
+    if (keep_pass) {
+        memcpy(ns.pass, s_cfg.secret.pass, sizeof(ns.pass));
+    }
+    err |= put_str(h, "smtp_host", ns.host);
+    err |= nvs_set_u16(h, "smtp_port", ns.port);
+    err |= nvs_set_u8(h, "smtp_sec", ns.security);
+    err |= put_str(h, "smtp_user", ns.user);
+    if (!keep_pass) {
+        err |= put_str(h, "smtp_pass", ns.pass);
+    }
+    err |= put_str(h, "smtp_from", ns.from_name);
+    err |= put_str(h, "kid_name", ns.kid_name);
+    err |= nvs_set_u16(h, "sec_max_s", ns.max_s);
+    err |= nvs_set_u8(h, "sec_cap_hr", ns.cap_hr);
+    err |= ns.bed_ok ? nvs_set_u8(h, "sec_bed", 1) : erase_key(h, "sec_bed");
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    if (err == ESP_OK) {
+        s_cfg.secret = ns;
+    }
+    s_gen++;
+    unlock();
+    nvs_close(h);
+    mbedtls_platform_zeroize(&ns, sizeof(ns));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "saving the secret message settings failed: %s", esp_err_to_name(err));
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+uint8_t config_slot_secret(int idx, char *email, size_t len)
+{
+    if (idx < 0 || idx >= CFG_MAX_CONTACTS) {
+        if (email && len) {
+            email[0] = '\0';
+        }
+        return CFG_SECRET_OFF;
+    }
+    lock();
+    const uint8_t m = s_cfg.contacts[idx].secret;
+    if (email && len) {
+        strlcpy(email, s_cfg.contacts[idx].email, len);
+    }
+    unlock();
+    return m;
+}
+
 bool config_has_twilio_key(void)
 {
     lock();
@@ -799,6 +1064,8 @@ esp_err_t config_factory_reset(void)
     s_cfg.max_call_min = APP_CALL_MAX_MIN_DEFAULT;
     s_cfg.bedtime.start_min = APP_BEDTIME_START_DEFAULT;
     s_cfg.bedtime.end_min = APP_BEDTIME_END_DEFAULT;
+    pins_defaults(&s_cfg.pins);
+    secret_defaults(&s_cfg.secret);
     s_gen++;
     unlock();
     ESP_LOGW(TAG, "factory reset: config erased (%s)", esp_err_to_name(err));

@@ -8,9 +8,15 @@ Toddler phone. An ESP32-S3 is USB host to a LIXADA retro telephone handset
 (USB Audio Class, "AB17X USB Audio", VID:PID 001f:0b23) and a minimal SIP
 client over WiFi to a Twilio SIP Domain in the parent's own Twilio account.
 Pick up the handset, press a button, and the phone calls
-that family member (G.711 mu-law, 8 kHz, RTP over UDP). Up to four buttons,
-one per person, each with a light that shows whether that person can be
-called right now (optional availability schedule in their own time zone).
+that family member (G.711 mu-law, 8 kHz, RTP over UDP). Four buttons out of
+the box (up to 24, on pins picked from the setup page), one per person, each
+with an optional light that shows whether that person can be called right
+now (optional availability schedule in their own time zone).
+
+A button can also record a **secret message**: the child talks into the
+handset and the phone emails the recording (a WAV file) to that button's
+person, straight from the parent's own email account over SMTP. Either a
+long press on a normal button, or a button that only records secrets.
 
 A non-technical parent sets it up with no toolchain: flash from a browser,
 type the WiFi name and password in the browser, then paste their Twilio
@@ -21,7 +27,8 @@ everything it needs in their Twilio account by itself.
 
 You need: a computer with Chrome or Edge, a Twilio account with one phone
 number that can make calls (Console > Phone Numbers > Buy a number), and the
-numbers of the one to four people the phone should call.
+numbers of the people the phone should call (one is enough; four buttons
+out of the box, more can be added, see Buttons and lights below).
 
 1. Plug the phone's **COM** USB port into the computer. Open the installer
    page, press **Connect**, pick the port, choose **Install**.
@@ -48,6 +55,63 @@ four; a time like 22:00 to 01:00 runs past midnight). Outside those times
 that person's light is off and their button says "They can't talk right
 now" (then a short busy tone) instead of calling. Until the phone's clock has synced from the internet, everyone
 counts as available (a clock problem never blocks a call).
+
+**Secret messages** (optional, off until you set them up): the child tells
+a secret into the handset and the phone emails the recording to someone, as
+a sound file, from your own email account (nothing goes through Twilio or
+any other server). Two parts on the setup page:
+
+1. The **Secret messages** card: your email account. For Gmail:
+   - turn on **2-Step Verification** at `myaccount.google.com/security`
+     (Google only offers app passwords with it on);
+   - open `myaccount.google.com/apppasswords`, type a name like "Kid Phone"
+     and press **Create**;
+   - on the card pick **Gmail**, type your Gmail address and paste the 16
+     letter app password (spaces don't matter), then press **Save** and
+     **Send test email**. The test goes to your own address; the card says
+     "Test email sent" or why it failed (a refused login is almost always
+     the app password).
+
+   iCloud Mail and Yahoo Mail work the same way with their own app
+   passwords (the card fills in their servers); for anything else pick
+   **Other** and type the SMTP server, port and security (SSL/TLS on 465 or
+   STARTTLS on 587). Some providers (possibly Outlook.com and Hotmail) may
+   not allow app passwords for sending. The login must be a full email
+   address; it is also the sender. The app password is never shown again:
+   leave the box empty to keep it. The phone only uses the app password to
+   send, but it is a mail password (it could also read mail), so treat it
+   like one. It can't sign in to your account, and it can be removed on the same Google page at any time, which switches the
+   phone's secrets off.
+
+   Also on the card: your child's name (the subject reads "🤫 A secret from
+   Mia, 7:42 pm", in the home time zone from the Bedtime card), the sender
+   name, the longest secret (10 to 120 seconds, 60 by default), how many
+   secrets an hour at most (5 by default; past it the button only plays the
+   busy tone), and whether secrets are allowed at bedtime (off by default:
+   then a secret press says "It's sleep time").
+
+2. In **Who the phone calls**, each button has a **Secret messages**
+   setting and the email address its secrets go to:
+   - **Long press records a secret (a short press still calls)**: a normal
+     contact button. A short press calls as before, but on the release
+     instead of the press; holding it for 1.5 s starts a secret for that
+     person instead.
+   - **Secret button only**: the button never calls and needs no phone
+     number (the phone does not even need Twilio for it). A press starts a
+     secret. Its light is on whenever a press would record one.
+   - **Off** (the default): the button works exactly as before.
+
+What the child hears: "Tell your secret after the beep!", a beep, then the
+phone records (the button's light blinks). A press of the same button ends
+it; at the length limit a second beep ends it. Then "Shh! Your secret is on
+its way." and the phone sends it in the background. Anything under 2
+seconds is thrown away without a word (an accidental hold). One secret waits
+to be sent at a time: until it has gone, another secret press plays the busy
+tone. If the WiFi or the mail server is down the phone tries again (after
+15 s, then doubling up to 16 minutes, 8 tries), never during a call; a
+refused login gives up at once. A secret that has not gone yet is lost if
+the phone loses power. The Status card shows the last secret ("Last secret:
+sent 7:42 pm", or what went wrong).
 
 **Call length**: calls end by themselves after 30 minutes (change it on the
 setup page, 1 to 120 minutes). The phone hangs up and says "Time's up!";
@@ -124,7 +188,7 @@ for 10 s (factory reset) and set the phone up from step 1.
 `RESET` and press **Factory reset**. Or hold the **BOOT** button on the
 phone's board for 10 seconds (the light blinks amber from 1.5 s on; let go
 before 10 s to cancel). Either way the phone forgets everything (all saved
-WiFi networks, Twilio connection, people, times, call length, bedtime) and restarts ready for step 1
+WiFi networks, Twilio connection, people, times, call length, bedtime, secret message email) and restarts ready for step 1
 above. Nothing in your Twilio account is deleted. The contact buttons cannot
 reset the phone: holding them does nothing.
 
@@ -144,6 +208,8 @@ What the lights and the earpiece tell you:
 | all off | red blinking | silent | no WiFi (a press says "The phone isn't connected") |
 | all off | blue | silent | WiFi OK, Twilio not set up yet (a press says "This phone isn't ready yet") |
 | on for whoever can be called | green | silent | ready, press a lit button to call |
+| a secret button's light on | | silent | a press records a secret (email set up, WiFi, nothing waiting to be sent, under the hourly limit) |
+| that button's light blinks | | prompt, beep, then silence | recording a secret |
 | off for one person | green | silent | that slot is empty, or the person is outside their available hours |
 | all off | green | silent | bedtime (a press says "It's sleep time") |
 | | blue pulsing | silent | Twilio setup running |
@@ -166,7 +232,9 @@ again):
 | "They didn't answer the phone." | The person did not pick up within 30 s, or declined the call (Twilio says it, then about 4 s of quiet, then hangs up). The phone says the same words itself if Twilio rejects the call as busy, declined or not answered (SIP 480, 486, 600, 603), or it rang for 90 s with no answer. | Nothing. |
 | "The phone isn't connected. Ask a grown-up for help." | No WiFi, or WiFi without internet (the phone could not look up or reach Twilio), or the WiFi dropped during a call. | Check the router and internet. A red blinking board light means no WiFi at all: none of the saved networks is in range or accepts the saved password (a new house, a new router, a changed password). Add the network from the setup page, or from the installer page (see "Taking the phone to another house"). |
 | "It's sleep time. You can call in the morning." | Bedtime is on and it is inside the bedtime hours (home time). | Nothing, or change bedtime on the setup page. |
-| "This phone isn't ready yet. Ask a grown-up for help." | Twilio setup has not been done, or the button pressed has nobody set up. | Open `http://kidphone.local/`, finish setup or fill in that button. |
+| "This phone isn't ready yet. Ask a grown-up for help." | Twilio setup has not been done, or the button pressed has nobody set up, or (a secret press) the email account for secret messages is not set up. | Open `http://kidphone.local/`, finish setup or fill in that button, or the Secret messages card. |
+| "Tell your secret after the beep!" | A secret message is starting (a long press or a secret button). | Nothing. Talk after the beep; press the same button to finish. |
+| "Shh! Your secret is on its way." | The secret is recorded and queued; the phone emails it in the background. | Nothing. The Status card shows when it has gone, or why it has not. |
 | "Oops, that call didn't work. Let's get a grown-up to help." | Twilio refused the call: login rejected (401/403/407, run setup again), SIP domain gone (404), the call was cut off by Twilio within 5 s (usually Geo permissions for that country, or a trial account calling an unverified number), or any other error (credit, account suspended). | Open the setup page: **Try it** shows the detailed reason of the last call. Then fix it in the Twilio Console or press **Run setup again**. |
 
 Note on calls that ring out: Twilio answers the phone's call at once and
@@ -185,7 +253,8 @@ once (it needs the Auth Token); changing numbers alone does not update it.
 
 Contact lights: on = can be called now, off = not set up, outside their
 hours, bedtime (all off), or the phone itself cannot call (no WiFi or Twilio
-not set up; then all are off), blinking = being called.
+not set up; then all are off), blinking = being called or recording a
+secret. A secret button's light is on when a press would record a secret.
 
 ## Hardware
 
@@ -204,9 +273,13 @@ not set up; then all are off), blinking = being called.
   back-feed 5 V), and do not feed a second supply into the 5V header pin.
 - Symptom of a missing bridge: `HPRT ... conn=0 ... D+=0 D-=0` and no USB
   activity at all, even though the handset works on a computer.
-- **Buttons and lights** (`APP_BUTTON_GPIOS`, `APP_CONTACT_LED_GPIOS` in
-  `src/app_config.h`). Wire as many as you have people; one is fine, unwired
-  buttons never fire (internal pull-up) and unwired lights do nothing.
+- **Buttons and lights**: picked on the setup page (**Buttons and lights**
+  card), saved in NVS (`pins`), applied as soon as you press Save (no
+  restart). Each button is a contact slot: button i calls the person in slot
+  i, and its light (optional) shows whether they can be called right now. A
+  button with no light calls normally; it just has no availability or
+  bedtime light. With nothing saved (every phone set up before 0.5.0, and
+  after a factory reset) the phone uses the original wiring:
 
   | Person | Button (other lead to GND) | Light (GPIO -> 330 ohm -> LED -> GND) |
   |---|---|---|
@@ -215,14 +288,32 @@ not set up; then all are off), blinking = being called.
   | 3 | GPIO 6 | GPIO 17 |
   | 4 | GPIO 7 | GPIO 18 |
 
+  Wire as many as you have people; one is fine, unwired buttons never fire
+  (internal pull-up) and unwired lights do nothing. These eight pins sit in
+  one run on the DevKitC's left header.
+
+  Pins the page offers (`APP_ASSIGNABLE_GPIOS` in `src/app_config.h`, 24 in
+  all, every one broken out on this board): **1, 2, 4-18, 21, 38-42, 47**.
+  Left out: strapping pins (0, 3, 45, 46; 0 is the BOOT button), native USB
+  (19/20, the handset), UART0 (43/44, console and Improv), flash (26-32),
+  octal PSRAM (33-37) and the RGB LED (48). 39-42 are the pad JTAG pins, but
+  JTAG on this build goes over USB (eFuse default) and nothing uses them, so
+  they are plain GPIOs. 15/16 are the optional 32 kHz crystal pins, unused on
+  this board.
+
+  Every pin is used once, so a button and a light each take one. With 12
+  buttons or fewer every button can have a light; past that the page warns
+  how many buttons will have to go without (24 buttons = no lights at all).
+  Each new button the page adds comes with a light while there are pins to
+  spare. The page only offers pins that are still free, and the phone
+  refuses a duplicate or a pin outside the list. A button can only be
+  removed (the last one in the list) once its person's number is cleared and
+  saved, so Twilio's list never holds a number no button can call.
+
   Buttons need no resistor (internal pull-up, 30 ms software debounce).
   Lights are active high: GPIO to a 330 ohm resistor to the LED's long leg
   (anode), short leg to GND. For a solderless build use LED modules with a
-  built-in resistor (signal to the GPIO, minus to GND). All eight pins sit
-  in one run on the DevKitC's left header (4, 5, 6, 7, 15, 16, 17, 18) and
-  avoid strapping pins (0, 3, 45, 46), USB (19/20), UART0 (43/44), flash and
-  octal PSRAM (26-37), JTAG (39-42) and the RGB LED (48). 15/16 are the
-  optional 32 kHz crystal pins, unused on this board.
+  built-in resistor (signal to the GPIO, minus to GND).
 - **BOOT button** (on the board, GPIO 0, active low, on-board pull-up): the
   parent-only button for test modes and factory reset (see Buttons). GPIO 0
   is a strapping pin, so the firmware only reads it after boot and never
@@ -279,8 +370,9 @@ All runtime config lives in NVS, namespace `kidphone` (`src/config_store.c`):
 | `sip_domain`, `sip_user`, `sip_pass` | str | Twilio provisioning |
 | `caller_id` | str | provisioning (the Twilio number, E.164) |
 | `tw_sid` | str | provisioning (Account SID, not a secret; prefills the page and enables the numbers-only update) |
-| `c0_name`/`c0_num` .. `c3_name`/`c3_num` | str | provisioning or `POST /api/contacts`; slot i = button i, empty number = unused |
-| `c0_sch` .. `c3_sch` | blob, 111 bytes | same; availability schedule, missing = always available |
+| `c0_name`/`c0_num` .. `c23_name`/`c23_num` | str | provisioning or `POST /api/contacts`; slot i = button i, empty number = unused. Slots 0-3 are the keys older firmware wrote, so they load unchanged. Since 0.5.0 an empty value is erased instead of written (missing = empty, also for older firmware), so unused slots take no NVS space |
+| `c0_sch` .. `c23_sch` | blob, 111 bytes | same; availability schedule, missing = always available (erased when off with no times) |
+| `pins` | blob, 66 bytes | `POST /api/pins`; which GPIO is each button and light. Missing, unreadable or invalid = the original wiring (buttons 4-7, lights 15-18), so phones from before 0.5.0 behave as before |
 | `provisioned` | u8 | provisioning (1 = done; trusted only if the SIP account and at least one number exist) |
 | `tw_key_sid`, `tw_key_sec` | str | provisioning; restricted Twilio API key (`SK...`) and its secret, used only for number updates. A sid without a secret = a key Twilio rejected, deleted on the next token run |
 | `tw_svc`, `tw_env` | str | provisioning; Serverless service and environment SIDs the key updates |
@@ -288,6 +380,12 @@ All runtime config lives in NVS, namespace `kidphone` (`src/config_store.c`):
 | `bed_on` | u8 | `POST /api/bedtime`; 1 = bedtime on, missing = off (configs from before 0.4.0 load unchanged) |
 | `bed_start`, `bed_end` | u16 | same; bedtime window in minutes of the day, home time, missing or out of range = 1170 (19:30) / 420 (07:00) |
 | `home_tz`, `home_tz_name` | str | same; home time zone (POSIX TZ rule) and the IANA name the page picked it from (display only), missing = not set yet |
+| `c0_sec` .. `c23_sec` | u8 | provisioning or `POST /api/contacts`; secret message mode of slot i: 1 = long press, 2 = secret button only. Missing (also every phone before 0.6.0) = off; erased when off |
+| `c0_mail` .. `c23_mail` | str | same; where slot i's secrets are emailed. Only kept while `c<i>_sec` is set (erased with it), so 24 unused slots cost nothing |
+| `smtp_host`, `smtp_port`, `smtp_sec` | str, u16, u8 | `POST /api/secret`; the parent's mail server for secrets, `smtp_sec` 0 = SSL/TLS from the first byte (465), 1 = STARTTLS (587). Missing host = secrets off |
+| `smtp_user`, `smtp_pass` | str | same; login (a full email address, also the sender) and app password. The password is never returned by any endpoint and never logged |
+| `smtp_from`, `kid_name` | str | same; sender name on the email (missing = "Kid Phone") and the child's name for the subject (missing = none); erased when empty |
+| `sec_max_s`, `sec_cap_hr`, `sec_bed` | u16, u8, u8 | same; longest secret 10..120 s (missing = 60), secrets per hour 1..20 (missing = 5), 1 = allowed at bedtime (missing = no; erased when off) |
 
 Schedule blob (`sched_blob_t` in `config_store.c`, packed, little endian):
 `version` u8 (1), `enabled` u8, `nwin` u8, `tz` char[48] (POSIX TZ rule),
@@ -296,6 +394,16 @@ Schedule blob (`sched_blob_t` in `config_store.c`, packed, little endian):
 window starts on each set day at `start_min`; `end_min <= start_min` runs
 into the next day, equal means 24 hours. A blob with another version or size
 is ignored (contact always available).
+
+Pins blob (`pins_blob_t` in `config_store.c`, packed): `version` u8 (1),
+`count` u8 (1..24 buttons), `button` int8[32], `lamp` int8[32]. Slot i < count
+has a button GPIO and a light GPIO or -1 (no light); slots from count on are
+-1. Room for 32 slots so a later firmware can add more without a new
+version. The NVS partition is only 24 KB (6 pages, about 630 usable 32-byte
+entries): a phone with all 24 contacts filled in and scheduled, each with
+secret messages and a 63 character email, and the email account set up, uses
+about 400 of them (a string takes one entry plus one per 32 bytes; the
+schedule blob six). That is why empty values are erased instead of written.
 
 The Twilio Auth Token is never stored: it lives in the provisioning task's
 RAM and is zeroed when the task ends. It is never logged, and no endpoint ever
@@ -400,12 +508,15 @@ phone only has the station interface, so it is only reachable on the home LAN.
 | Endpoint | What |
 |---|---|
 | `GET /` | setup page |
-| `GET /api/status` | `settings` {`max_call_minutes` and its bounds}, `bedtime` {`enabled`, `start`, `end` ("HH:MM", home time), `tz`, `tz_name`, `scheduled` = on with a valid home time zone, `active` = asleep now}, WiFi, Twilio (provisioned, caller ID, account SID, SIP user, `login_current`, `numbers_key` = a restricted key is stored), 4 contact slots with schedule, `available`, `next` {day, time} in their time zone, `time_synced`, handset, call state and contact, last call result (`code`, `kind`, `message`), setup progress (`state`, `run`, `steps`, on failure `error`, `hint`, `needs_token`) |
-| `POST /api/contacts` | `{contacts:[{name, number, schedule:{enabled, tz, tz_name, windows:[{days, start, end}]}} x up to 4]}`; saves names, button order and schedules without a token. If the set of numbers differs from what Twilio allows and a numbers key is stored: 202 `{updating: true, run}`, the key run starts (progress in `/api/status`; if Twilio rejects the key it fails with `needs_token`). No key: 409 `{needs_token: true}` |
+| `GET /api/status` | `secret` {`configured` (host, login and password saved), `smtp_host`, `smtp_port`, `smtp_security` ("tls" or "starttls"), `smtp_user`, `has_password` (never the password), `from_name`, `kid_name`, `max_seconds`, `hourly_cap`, `bedtime_ok` and the bounds, `last` {`seq`, `state` (none, recording, queued, sending, retrying, sent, failed, discarded), `message`, `slot`, `seconds`, `ago_s`, `utc` when recorded}, `test` {`seq`, `state`, `message`}, `last_hour`, `waiting`, `recording`}, each contact's `secret` ("off", "hold", "dedicated") and `email`, `settings` {`max_call_minutes` and its bounds}, `bedtime` {`enabled`, `start`, `end` ("HH:MM", home time), `tz`, `tz_name`, `scheduled` = on with a valid home time zone, `active` = asleep now}, WiFi, Twilio (provisioned, caller ID, account SID, SIP user, `login_current`, `numbers_key` = a restricted key is stored), one contact slot per wired button with schedule, `available`, `next` {day, time} in their time zone, `time_synced`, handset, call state and contact, last call result (`code`, `kind`, `message`), setup progress (`state`, `run`, `steps`, on failure `error`, `hint`, `needs_token`) |
+| `POST /api/contacts` | `{contacts:[{name, number, schedule:{enabled, tz, tz_name, windows:[{days, start, end}]}, secret, email} x up to 24]}` (a number or a secret mode on a slot with no button pin: 400; `secret` "hold" needs a number, "dedicated" must have none, either needs a plain `email`). A phone not set up with Twilio can save secret buttons only (no numbers at all) here; saves names, button order and schedules without a token. If the set of numbers differs from what Twilio allows and a numbers key is stored: 202 `{updating: true, run}`, the key run starts (progress in `/api/status`; if Twilio rejects the key it fails with `needs_token`). No key: 409 `{needs_token: true}` |
 | `POST /api/provision` | `{account_sid, auth_token, contacts, full}` (202 `{ok, message, run}`). Already set up with its own login, same account, `full` not true: numbers-only update. Otherwise the full setup. `account_sid` may be omitted once stored. Old `contact_name`/`contact_number` still accepted |
 | `POST /api/settings` | `{max_call_minutes}`, a whole number 1..120 (400 otherwise); no token |
+| `POST /api/secret` | `{smtp_host, smtp_port, smtp_security, smtp_user, smtp_pass, from_name, kid_name, max_seconds, hourly_cap, bedtime_ok}`: secret message email account and limits. `smtp_pass` missing or empty keeps the saved one (spaces are removed, as app passwords are shown in groups), `clear_password: true` erases it. 400 on a bad host, port, login (must be an email address) or out-of-range limit. Device only, no token |
+| `POST /api/secret/test` | `{}`: a text-only test email to the login's own address with the saved settings; 202, the outcome in `/api/status` `secret.test` (409 if not set up, no WiFi, or an email is already being sent) |
 | `POST /api/bedtime` | `{enabled, start, end, tz, tz_name}`: times as "HH:MM" or minutes of the day (home time), `tz` a POSIX TZ rule. 400 if a time is missing or out of range, if on with equal times, or if `tz` does not parse (required when on). Device only, no token |
-| `POST /api/call` | `{contact: i}` test call, same rules as button i (409 if outside their hours) except bedtime, which does not apply to it (the parent testing) |
+| `POST /api/pins` | `{buttons:[{button, lamp} x 1..24]}`: GPIO of each button and its light (`lamp` -1 or null = no light), in button order. 400 if a pin is not in the assignable list or used twice; 409 while setup runs, or if a button that would go away still has a number or a secret mode (clear and save it first). Applied live within about 100 ms. `GET /api/status` has `pins` {`max`, `assignable`, `buttons`}. Device only, no token |
+| `POST /api/call` | `{contact: i}` test call, same rules as button i (409 if outside their hours, or while a secret is being recorded) except bedtime, which does not apply to it (the parent testing) |
 | `POST /api/hangup` | hang up |
 | `GET /api/wifi` | `{connected, state` ("connected", "connecting", "scanning", "waiting", "no networks")`, ssid, rssi, ip, max, uptime_s, saved: [{ssid, secured, connected, in_last_scan, last_rssi, last_seen_ago_s, last_result, last_text, last_reason, last_try_ago_s}], attempts: [{ssid, rssi, result, text, reason, at_s, ago_s, improv}]}`. `attempts` = the last 8, newest first (RAM only, since boot). `result`/`last_result` is one of `connected`, `wrong_password`, `not_found`, `timeout`, `no_ip`, `dropped`, `other`; `text` is the plain-English version shown on the page; `reason` is the driver's disconnect reason (0 = none). History fields are left out when unknown: `in_last_scan` before the first scan, `last_rssi`/`last_seen_ago_s` if no scan saw it, `last_*` result fields if it was never tried, `rssi` if the scan before that attempt did not see it, `improv` unless true. The same object is `wifi` in `/api/status`. Never a password |
 | `POST /api/wifi/scan` | `{}`. Blocks a few seconds; `{networks: [{ssid, rssi, bars (1-4), secured, saved, connected}]}`, one entry per SSID (strongest access point), strongest first, hidden networks left out. The connection stays up. 409 during a call (the scan would pause the audio), 503 if the radio is busy |
@@ -545,12 +656,56 @@ by bedtime) and an idle press plays `sleep_time` and the short busy tone
 checks). Not synced yet, off, or no valid home time zone: never active, so a
 clock problem never blocks a call. `POST /api/call` skips it on purpose.
 
+### Secret messages
+
+`src/secret.c` (steps, recorder hand-off, queue, send task), `src/smtp.c`
+(the SMTP client), `src/mime.c` (the message), `src/wav.c` (header and level
+boost). The handset streams run whenever it is plugged in (`usb_audio.c`
+opens and starts both at enumeration), so a secret needs no SIP call: the
+button task plays the start prompt, then `app_mode_get()` reports
+`MODE_BEEP` (one 880 Hz beep, `APP_SECRET_BEEP_MS`) and then `MODE_SECRET`,
+in which the audio task hands every mic block to the recorder and keeps the
+earpiece silent. The recorder low-passes and decimates the mono mic
+(48 kHz, 3x, the same Blackman windowed-sinc FIR as the telephone path,
+97 taps, corner 6.8 kHz: -0.3 dB at 6 kHz, -24 dB at 7.5 kHz, -56 dB at
+8 kHz, below one LSB from 9 kHz on) into 16 kHz mono 16-bit PCM in a PSRAM
+buffer taken when the secret starts, sized for the longest allowed secret
+(32 KB per second: 1.9 MB at 60 s, 3.75 MB at 120 s) and freed once it has
+been sent or given up. Recording starts 150 ms after the beep so the beep
+is not in it. The buffer is owned by the button task or the audio task by a
+small atomic hand-off (`REC_ON` / `REC_STOP` / `REC_DONE`), so neither side
+ever copies it. A handset unplugged mid-secret throws the recording away.
+
+Before sending, the level is raised so the loudest sample sits at about
+-3 dBFS, by at most 4x (12 dB): whispered secrets come out audible, loud
+ones are left alone. The email is one multipart/mixed message: a short text
+part and the WAV, both base64, the subject and any non-ASCII name as RFC 2047
+encoded words. The attachment is base64 encoded from the PSRAM buffer about
+5 KB at a time straight into the TLS connection, so there is never a second
+copy (a 60 s secret is a 2.6 MB email). SMTP: TLS from the first byte (465)
+or STARTTLS (587, refused if the server does not offer it, so the password
+never goes out in the clear), server certificate checked against the ESP-IDF
+certificate bundle, AUTH PLAIN or LOGIN, `APP_SECRET_SMTP_TIMEOUT_MS` on
+every step, dot-stuffing on the data. The send task (`APP_SECRET_STACK`,
+12 KB of internal RAM for the TLS handshake; the mbedtls buffers are in
+PSRAM) waits for WiFi and for any call to end, logs how long each send took
+and how much of its stack is left, and retries as described in Setup.
+Permanent failures (unknown server name, certificate, login refused,
+recipient refused) give up at once; settings saved on the page make a
+waiting secret try again right away. A host-side test of the resampler
+response, the base64 / MIME writer (parsed back with Python's `email`
+package, attachment byte-identical) and the WAV header was run during
+development; the SMTP client itself is tested only on the phone.
+
 ### Privacy
 
 The phone talks to the parent's own Twilio account (`api.twilio.com`,
 `serverless.twilio.com`, `serverless-upload.twilio.com`, `iam.twilio.com`, the SIP domain and
-Twilio media servers) and to NTP (`pool.ntp.org`, `time.google.com`) for the
-clock. Nothing else.
+Twilio media servers), to NTP (`pool.ntp.org`, `time.google.com`) for the
+clock, and, only if secret messages are set up, to the parent's own mail
+server (`smtp.gmail.com` or whatever the card says) with the parent's own
+login. Nothing else. A secret's recording lives only in RAM until it has been
+sent.
 
 Progress shows as plain-language steps on the page; failures show Twilio's
 message plus a hint.
@@ -564,10 +719,18 @@ message plus a hint.
 | idle | short press while a prompt plays, or within 3 s (`APP_PRESS_COOLDOWN_MS`) after a call ended or failed | ignored (button mashing) |
 | calling / ringing / in call | press any button | hang up (CANCEL before answer, BYE after); the 3 s cooldown then starts |
 | in call | call reaches the call length limit (setup page, default 30 min) | BYE, then "Time's up!", then silence |
+| idle | "long press" button: press and release within 1.5 s (`APP_SECRET_HOLD_MS`) | call, on the release |
+| idle | "long press" button: hold 1.5 s | start a secret for that contact (the release then does nothing) |
+| idle | "secret button only": press | start a secret |
+| idle | secret press: bedtime (unless allowed), no WiFi, email not set up, over the hourly limit, a secret still waiting to be sent, no handset | "It's sleep time", "The phone isn't connected" or "This phone isn't ready yet" with the busy tone; the others only the busy tone |
+| recording a secret | press the same button | stop; under 2 s it is thrown away, otherwise "Shh! Your secret is on its way." and the 3 s cooldown |
+| recording a secret | press another button | ignored |
 
 A contact button acts once, on the press edge (it does not wait for the
 release). Holding it does nothing more and never repeats: the next action
-needs a release and a new press. Contact buttons cannot change test modes or
+needs a release and a new press. The one exception is a button set to "long
+press" secrets: it calls on the release, since only then is it known that it
+was not a hold. Contact buttons cannot change test modes or
 reset the phone; those are on the board's BOOT button, out of a child's
 reach:
 
@@ -629,9 +792,9 @@ at idle as above. Mode C is the only way to hear the dial tone by default.
 
 ### Spoken prompts
 
-The phone speaks seven short sentences (table in Setup). They are made
+The phone speaks nine short sentences (table in Setup). They are made
 offline by `scripts/gen_prompts.py` and committed as raw 16 kHz mono 16-bit
-little-endian PCM in `src/prompts/` (about 850 KB in all, embedded with
+little-endian PCM in `src/prompts/` (about 1 MB in all, embedded with
 `EMBED_FILES` in `src/CMakeLists.txt` and `board_build.embed_files` in
 `platformio.ini`; the two lists must match). The phone never synthesizes
 speech and never fetches audio. The audio task plays a prompt through its own
@@ -876,8 +1039,13 @@ after the SIP leg is answered, which is why they show up as a short call.
 ## Layout
 
 ```
-src/main.c            app entry, button task (4 contact buttons: call / hang up; BOOT: test modes / factory reset), factory reset, effective audio mode
-src/contact_leds.c/.h one light per contact (available / off / blinking while called)
+src/main.c            app entry, button task (contact buttons: call / hang up / secret long press or dedicated; applies pin changes live; BOOT: test modes / factory reset), factory reset, effective audio mode
+src/pins.c/.h         button and light pins: assignable list, defaults, validation, GPIO setup
+src/contact_leds.c/.h one light per contact (available / off / blinking while called or recording a secret)
+src/secret.c/.h       secret messages: recording steps, mic to PSRAM at 16 kHz, the one queued secret, send task with retries
+src/smtp.c/.h         SMTP client (465 TLS or 587 STARTTLS, mbedtls + certificate bundle, AUTH PLAIN / LOGIN)
+src/mime.c/.h         email writer: multipart, base64 streamed from the buffer, RFC 2047 headers (host-testable)
+src/wav.c/.h          WAV header and the level boost (host-testable)
 src/schedule.c/.h     SNTP, per-contact availability evaluation
 src/tz_posix.c/.h     POSIX TZ rule math (no global TZ, host-testable)
 src/config_store.c/.h runtime config in NVS (WiFi networks and migration, SIP account, contacts and schedules), secrets.h seeding
@@ -893,7 +1061,7 @@ src/usb_audio.c/.h    USB host + UAC driver: hot-plug, descriptor log, format ch
 src/audio_engine.c/.h audio task (core 1): mic jitter ring, modes A-D and CALL, prompt playback, stats
 src/prompts.c/.h      spoken prompt table and play requests (clips embedded from src/prompts/)
 src/prompts/*.pcm     the spoken prompts, 16 kHz mono s16le, made by scripts/gen_prompts.py
-src/app_config.h      all tunables (button and LED GPIOs, block size, volumes, buffers, SIP/RTP ports and timers)
+src/app_config.h      all tunables (assignable and default button and LED GPIOs, block size, volumes, buffers, SIP/RTP ports and timers)
 src/secrets.h         optional developer override (gitignored; template secrets.h.example)
 twilio/voice.js       Twilio Function behind the SIP Domain voice URL (allowlist, echo test, no-answer sentence); embedded and uploaded by provisioning
 twilio/no_answer.wav  "They didn't answer the phone." for Twilio's <Play> (8 kHz mu-law, 17 KB, made by scripts/gen_prompts.py); embedded and uploaded as a public asset

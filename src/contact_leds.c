@@ -8,14 +8,13 @@
 
 #include "app_config.h"
 #include "config_store.h"
+#include "pins.h"
 #include "schedule.h"
+#include "secret.h"
 #include "sip.h"
 #include "wifi.h"
 
 static const char *TAG = "leds";
-
-_Static_assert(APP_NUM_BUTTONS == CFG_MAX_CONTACTS, "one button and one LED per contact");
-static const int k_led_gpio[APP_NUM_BUTTONS] = APP_CONTACT_LED_GPIOS;
 
 static void leds_task(void *arg)
 {
@@ -30,38 +29,37 @@ static void leds_task(void *arg)
         /* Bedtime: every light off, whatever each contact's own hours say.
          * A call already going keeps blinking (it is not cut off). */
         const bool asleep = schedule_bedtime_active();
-        for (int i = 0; i < APP_NUM_BUTTONS && i < CFG_MAX_CONTACTS; i++) {
-            cfg_contact_t c;
-            bool has = config_get_contact(i, &c);
+        /* A secret being recorded blinks its button's light. */
+        const int recording = secret_slot();
+        /* The pins the button task made live (pins.h); a contact with no
+         * light is skipped, it calls all the same. */
+        cfg_pins_t pins;
+        pins_applied(&pins);
+        for (int i = 0; i < pins.count && i < CFG_MAX_CONTACTS; i++) {
+            if (pins.lamp[i] < 0) {
+                continue;
+            }
             bool on;
-            if (i == calling) {
+            if (i == calling || i == recording) {
                 on = blink_on;
+            } else if (config_slot_secret(i, NULL, 0) == CFG_SECRET_DEDICATED) {
+                /* A secret button: on whenever a press would record. */
+                on = secret_slot_ready(i, asleep);
             } else {
+                cfg_contact_t c;
+                const bool has = config_get_contact(i, &c);
                 on = can_call && !asleep && has && schedule_available(i);
             }
-            gpio_set_level(k_led_gpio[i], on ? 1 : 0);
+            gpio_set_level(pins.lamp[i], on ? 1 : 0);
         }
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
+/* The pins themselves are set up by pins_apply() (app_main, then the button
+ * task on every change). */
 void contact_leds_start(void)
 {
-    uint64_t mask = 0;
-    for (int i = 0; i < APP_NUM_BUTTONS; i++) {
-        mask |= 1ULL << k_led_gpio[i];
-    }
-    const gpio_config_t cfg = {
-        .pin_bit_mask = mask,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    ESP_ERROR_CHECK(gpio_config(&cfg));
-    for (int i = 0; i < APP_NUM_BUTTONS; i++) {
-        gpio_set_level(k_led_gpio[i], 0);
-    }
-    xTaskCreatePinnedToCore(leds_task, "contact_leds", 2560, NULL, 1, NULL, 0);
-    ESP_LOGI(TAG, "contact LEDs on GPIO %d, %d, %d, %d", k_led_gpio[0], k_led_gpio[1], k_led_gpio[2], k_led_gpio[3]);
+    xTaskCreatePinnedToCore(leds_task, "contact_leds", 3072, NULL, 1, NULL, 0);
+    ESP_LOGI(TAG, "contact lights task started");
 }

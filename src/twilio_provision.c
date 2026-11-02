@@ -210,7 +210,7 @@ typedef struct {
     int tw_code;
 
     char url[256];
-    char body[512];
+    char body[1024];           /* fits ALLOWED with every slot used, form-encoded */
 } prov_t;
 
 /* Thrown by a failing step: user-facing message + hint. */
@@ -909,12 +909,26 @@ static bool set_variable(prov_t *p, const char *key, const char *value)
     return true;
 }
 
-/* ALLOWED: comma separated numbers of all used contact slots. */
+/* ALLOWED: comma separated numbers of all used contact slots, each number
+ * once (two buttons may call the same person). Worst case CFG_MAX_CONTACTS
+ * different 15-digit numbers: 24 x 16 + 23 commas = 407 characters, under
+ * Twilio's 450 character limit for a variable value; ALLOWED_MAX keeps the
+ * build honest if CFG_MAX_CONTACTS grows. Form-encoded ("+" and "," are 3
+ * bytes each) it is about 520 bytes, inside p->body. */
+#define ALLOWED_MAX (CFG_MAX_CONTACTS * 17)
+_Static_assert(ALLOWED_MAX - 1 <= 450, "ALLOWED could exceed Twilio's variable value limit");
 static void allowed_list(const prov_t *p, char *out, size_t len)
 {
     out[0] = '\0';
     for (int i = 0; i < CFG_MAX_CONTACTS; i++) {
         if (!p->contacts[i].number[0]) {
+            continue;
+        }
+        bool dup = false;
+        for (int j = 0; j < i && !dup; j++) {
+            dup = strcmp(p->contacts[j].number, p->contacts[i].number) == 0;
+        }
+        if (dup) {
             continue;
         }
         if (out[0]) {
@@ -1005,7 +1019,7 @@ static bool step_serverless(prov_t *p)
     step("Build finished");
 
     /* Environment variables: who may be called, and the number calls come from. */
-    char allowed[CFG_MAX_CONTACTS * 21];
+    char allowed[ALLOWED_MAX];
     allowed_list(p, allowed, sizeof(allowed));
     if (!set_variable(p, "CALLER_ID", p->caller_id) || !set_variable(p, "ALLOWED", allowed)) {
         return false;
@@ -1180,7 +1194,7 @@ static void step_buttons(const prov_t *p)
 /* Set ALLOWED from p->contacts and redeploy p->build_sid (svc / env set). */
 static bool push_allowed(prov_t *p)
 {
-    char allowed[CFG_MAX_CONTACTS * 21];
+    char allowed[ALLOWED_MAX];
     allowed_list(p, allowed, sizeof(allowed));
     if (!set_variable(p, "ALLOWED", allowed)) {
         return false;

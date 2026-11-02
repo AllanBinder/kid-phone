@@ -83,6 +83,8 @@ PROMPTS = {
     "not_ready": "This phone isn't ready yet. Ask a grown-up for help.",
     "cant_call": "Oops, that call didn't work. Let's get a grown-up to help.",
     "sleep_time": "It's sleep time. You can call in the morning.",
+    "secret_start": "Tell your secret after the beep!",
+    "secret_sent": "Shh! Your secret is on its way.",
 }
 
 

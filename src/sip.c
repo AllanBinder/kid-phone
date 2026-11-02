@@ -1031,15 +1031,22 @@ static void start_failed(const char *why)
 
 static void start_call(int contact)
 {
-    app_cfg_t cfg;
-    config_get(&cfg);
-    strlcpy(s_domain, cfg.sip_domain, sizeof(s_domain));
-    strlcpy(s_user, cfg.sip_user, sizeof(s_user));
-    strlcpy(s_pass, cfg.sip_pass, sizeof(s_pass));
-    strlcpy(s_dest, cfg.contacts[contact].number, sizeof(s_dest));
-    bool ready = cfg.provisioned;
-    const unsigned max_min = cfg.max_call_min;
-    config_wipe(&cfg);
+    /* The whole config is several KB (CFG_MAX_CONTACTS slots): heap, not stack. */
+    app_cfg_t *cfg = malloc(sizeof(app_cfg_t));
+    if (!cfg) {
+        atomic_store(&s_contact, contact);
+        start_failed("out of memory, cannot call");
+        return;
+    }
+    config_get(cfg);
+    strlcpy(s_domain, cfg->sip_domain, sizeof(s_domain));
+    strlcpy(s_user, cfg->sip_user, sizeof(s_user));
+    strlcpy(s_pass, cfg->sip_pass, sizeof(s_pass));
+    strlcpy(s_dest, cfg->contacts[contact].number, sizeof(s_dest));
+    bool ready = cfg->provisioned;
+    const unsigned max_min = cfg->max_call_min;
+    config_wipe(cfg);
+    free(cfg);
     atomic_store(&s_contact, contact);
 
     if (!ready || !s_dest[0]) {
