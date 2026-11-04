@@ -1103,6 +1103,22 @@ after the SIP leg is answered, which is why they show up as a short call.
   FIFO: RX 88 lines (mic), periodic TX 96 (earpiece), non-periodic TX 16.
 - In idle modes the mic is not drained, so the audio stats show about 500
   mic overruns per 5 s. Harmless.
+- **XMC D-series flash boot loop (fixed in 0.7.1, 2026-11-04):** some
+  N16R8 clone boards carry XMC D-series flash (RDID vendor 0x46, SFDP
+  manufacturer 0x20). The stock ESP-IDF 5.5.3 bootloader runs the XM25QHxxC
+  startup flow on them, rejects the chip and reboots forever, so the board
+  never reaches Improv WiFi (solid red + green lights). Serial shows
+  `XMC flash startup fail` / `failed when running XMC startup flow, reboot!`.
+  `scripts/patch_xmc_bootloader.py` (a `pre:` extra script in
+  `platformio.ini`) patches the framework's `is_xmc_chip_strict()` in place
+  with the ESP-IDF master check (0x46 = XMC, no startup flow needed) before
+  every build; it is idempotent and fails the build if the source no longer
+  matches. Do NOT set `CONFIG_BOOTLOADER_FLASH_XMC_SUPPORT=n` instead: that
+  branch rejects every 0x20 chip and would break boards with older XMC
+  flash. Drop the script once the bundled ESP-IDF carries the upstream fix
+  (the script then reports "already accepts" and does nothing). Read a
+  board's flash ID with esptool-js (espressif.github.io/esptool-js) or
+  `esptool.py flash_id`.
 - Bring-up logging is off by default: `APP_SIP_LOG_FULL 0`, and the USB host
   debug tags plus the HPRT port probe are behind `APP_USB_DEBUG` (default 0).
 
