@@ -199,12 +199,17 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     </select>
     <details id="sec-gmail">
       <summary>How to get a Gmail app password</summary>
+      <p>An app password is a separate 16 letter password Google makes for one device, so the phone never needs your real Gmail password. It takes about two minutes, best done on a computer.</p>
       <ol>
-        <li>Open <b>myaccount.google.com/security</b> and turn on <b>2-Step Verification</b> (Google only offers app passwords with it on).</li>
-        <li>Open <b>myaccount.google.com/apppasswords</b>, type a name like "Kid Phone" and press <b>Create</b>.</li>
-        <li>Copy the 16 letter password into App password below. The spaces don't matter.</li>
+        <li>Sign in to the Gmail account the secrets should come from, then open <b>myaccount.google.com/security</b>.</li>
+        <li>Under "How you sign in to Google", turn on <b>2-Step Verification</b> if it is off, and follow Google's steps (usually a text code to your phone). Google only offers app passwords with it on.</li>
+        <li>Open <b>myaccount.google.com/apppasswords</b> (type it in the address bar; it is hard to find in the menus). Google may ask for your password again.</li>
+        <li>Under "App name" type <b>Kid Phone</b> and press <b>Create</b>.</li>
+        <li>Google shows a box with 16 letters in four groups, like <b>abcd efgh ijkl mnop</b>. Copy it into App password below and press Save. The spaces don't matter.</li>
+        <li>Press <b>Done</b>. Google never shows it again; if you lose it, delete it on the same page and make a new one.</li>
       </ol>
-      <p class="hint">The phone only uses the app password to send. It can't sign in to your account, and you can remove it on the same page to switch secrets off. Some providers (possibly Outlook.com and Hotmail) may not allow app passwords; any provider with SMTP login works.</p>
+      <p class="hint">If the apppasswords page says the setting is not available for your account: 2-Step Verification is still off, the account is a work or school account whose admin blocks app passwords, or it signs in only with a passkey or security key (add a phone number as a second step). Changing your Google password deletes every app password, so make a new one after that.</p>
+      <p class="hint">The phone only uses the app password to send mail. It can't change your account settings, and deleting it on the apppasswords page switches secrets off. Some providers (possibly Outlook.com and Hotmail) may not allow app passwords; any provider with SMTP login works.</p>
     </details>
     <div class="two">
       <div><label for="sec-user">Your email address (the login)</label><input id="sec-user" type="email" autocomplete="off" spellcheck="false" autocapitalize="off"></div>
@@ -708,7 +713,7 @@ function normNum(n) {
   return n.replace(/[ \-.()\/]/g, "");
 }
 const tail = (n) => "..." + n.slice(-4);
-const savedContacts = () => (st.twilio.contacts || []).map((c) => ({name: c.name || "", number: c.number || ""}));
+const savedContacts = () => (st.twilio.contacts || []).map((c) => ({name: c.name || "", number: c.number || "", secret: c.secret || "off", email: c.email || ""}));
 
 /* The run ended "done": check that the phone really stores what was sent,
  * then say per button what it calls now. */
@@ -723,9 +728,12 @@ function saveSucceeded(pr) {
   }
   const lines = [];
   now.forEach((c, i) => {
-    const b = pr.before[i] || {number: ""};
-    if (c.number && c.number !== b.number) lines.push("Button " + (i + 1) + " (" + c.name + ") now calls " + tail(c.number) + ".");
-    else if (!c.number && b.number) lines.push("Button " + (i + 1) + " is now unused.");
+    const b = pr.before[i] || {number: "", secret: "off", email: ""};
+    /* A secret-only button has no number but is in use. */
+    if (c.secret === "dedicated") {
+      if (b.secret !== "dedicated" || c.email !== b.email) lines.push("Button " + (i + 1) + " now records secrets for " + (c.name || c.email) + ".");
+    } else if (c.number && c.number !== b.number) lines.push("Button " + (i + 1) + " (" + c.name + ") now calls " + tail(c.number) + ".");
+    else if (!c.number && (b.number || b.secret === "dedicated")) lines.push("Button " + (i + 1) + " is now unused.");
   });
   saveNote(lines.length ? "Saved. " + lines.join(" ") : "Saved.", "good");
   showSaveErr(null);
