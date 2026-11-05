@@ -158,6 +158,16 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
     <p class="hint" id="maxmin-msg"></p>
   </section>
 
+  <section class="card" id="c-emerg">
+    <h2>Emergency calls</h2>
+    <label for="emtaps">Quick presses that call even when someone is not available</label>
+    <input id="emtaps" type="number" inputmode="numeric" min="0" max="50" step="1" placeholder="Off" style="max-width: 140px">
+    <p class="hint">Leave it empty to turn this off (the default). When it is on, pressing the same button this many times in a row, each press less than <span id="emgap">1.5</span> seconds after the last, calls that person even at bedtime or outside their available times. Just before the call the phone plays a short rising tune, so you can tell your child: "If you really need me, keep pressing my button until you hear the music." 15 to 20 is a good number: high enough that playing with the buttons does not set it off. A person who is available is called on the first press as usual. While this is on, more quick presses do not hang up a call the button just made; to hang up, wait a moment, then press. It still needs WiFi and a phone that is set up.</p>
+    <p class="hint" id="emlast"></p>
+    <button type="button" id="b-emtaps">Save</button>
+    <p class="hint" id="emtaps-msg"></p>
+  </section>
+
   <section class="card" id="c-lang">
     <h2>Voice language</h2>
     <label for="lang">Language the phone speaks in</label>
@@ -460,6 +470,7 @@ let pendingContacts = null; /* contacts waiting for the Auth Token ("numbers" mo
 let pendingRun = null;
 let mmDirty = false; /* call length edited, not saved yet */
 let langDirty = false; /* voice language picked, not saved yet */
+let emDirty = false; /* emergency presses edited, not saved yet */
 let bedDirty = false, bedSig = null; /* bedtime edited, not saved yet / what the form was loaded from */
 let resetting = false; /* factory reset sent: stop polling, the phone is going away */
 let pinRows = null; /* [{button, lamp}] being edited, lamp -1 = no light */
@@ -822,6 +833,13 @@ function render() {
   if (set.max_call_minutes && document.activeElement !== mm && !mmDirty) mm.value = set.max_call_minutes;
   if (set.max_call_minutes_lo) { mm.min = set.max_call_minutes_lo; mm.max = set.max_call_minutes_hi; }
   if (set.lang && !langDirty) $("lang").value = set.lang;
+  const em = $("emtaps");
+  if (set.emergency_taps !== undefined && document.activeElement !== em && !emDirty) em.value = set.emergency_taps ? set.emergency_taps : "";
+  if (set.emergency_taps_hi) em.max = set.emergency_taps_hi;
+  if (set.emergency_gap_ms) $("emgap").textContent = String(set.emergency_gap_ms / 1000);
+  const eml = set.emergency_last;
+  $("emlast").textContent = eml ? "Last used: button " + (eml.slot + 1) + ((cs[eml.slot] || {}).name ? " (" + cs[eml.slot].name + ")" : "") +
+    ", " + agoText(eml.ago_s) + "." : "";
   renderBedtime();
   renderPins();
   renderSecret();
@@ -1213,6 +1231,25 @@ $("b-maxmin").addEventListener("click", async () => {
   $("b-maxmin").disabled = false;
   $("maxmin-msg").textContent = r.ok ? "Saved." : (r.j.error || "Could not save. Try again.");
   if (r.ok) { mmDirty = false; kick(); }
+});
+
+/* ---------- emergency calls ---------- */
+
+$("emtaps").addEventListener("input", () => { emDirty = true; $("emtaps-msg").textContent = ""; });
+$("b-emtaps").addEventListener("click", async () => {
+  const raw = $("emtaps").value.trim();
+  const v = raw === "" ? 0 : Number(raw);
+  const lo = (st && st.settings && st.settings.emergency_taps_lo) || 5, hi = Number($("emtaps").max);
+  if (!Number.isInteger(v) || (v !== 0 && (v < lo || v > hi))) {
+    $("emtaps-msg").textContent = "Leave it empty to turn it off, or pick " + lo + " to " + hi + " presses.";
+    return;
+  }
+  $("b-emtaps").disabled = true;
+  const r = await api("/api/settings", {emergency_taps: v});
+  $("b-emtaps").disabled = false;
+  $("emtaps-msg").textContent = r.ok ? (v ? "Saved. " + v + " quick presses of a button now call that person at any time." : "Saved. Emergency calls are off.") :
+    (r.j.error || "Could not save. Try again.");
+  if (r.ok) { emDirty = false; kick(); }
 });
 
 /* ---------- voice language ---------- */

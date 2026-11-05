@@ -72,6 +72,21 @@
 /* Presses are ignored while a spoken prompt plays and for this long after a
  * call ends or fails, so mashing a button cannot place a burst of calls. */
 #define APP_PRESS_COOLDOWN_MS   3000
+/* Emergency override (NVS emerg_taps, setup page, off by default): the same
+ * contact button pressed that many times in a row calls that person even at
+ * bedtime or outside their available hours. A press counts toward the run if
+ * it comes within APP_EMERGENCY_GAP_MS of the one before (a longer pause, or
+ * another button, starts over). Counts the page accepts: off (0) or LO..HI.
+ * When the run reaches the count the phone plays the emergency tone, then
+ * calls: four rising notes (C5 E5 G5 C6, APP_EMERGENCY_NOTE_MS each), a
+ * pause of one note, the four again. Nothing else on the phone sounds like
+ * it. */
+#define APP_EMERGENCY_GAP_MS    1500
+#define APP_EMERGENCY_TAPS_LO   5
+#define APP_EMERGENCY_TAPS_HI   50
+#define APP_EMERGENCY_NOTE_MS   150
+#define APP_EMERGENCY_TONE_MS   (9 * APP_EMERGENCY_NOTE_MS)
+#define APP_EMERGENCY_AMPL      0.10f
 
 /* Availability schedules: re-evaluated this often (and on config changes). */
 #define APP_SCHED_EVAL_MS       1000

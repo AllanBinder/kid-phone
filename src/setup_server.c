@@ -354,6 +354,17 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddNumberToObject(set, "max_call_minutes_lo", APP_CALL_MAX_MIN_LO);
     cJSON_AddNumberToObject(set, "max_call_minutes_hi", APP_CALL_MAX_MIN_HI);
     cJSON_AddStringToObject(set, "lang", prompt_lang_code((prompt_lang_t)c->lang));
+    cJSON_AddNumberToObject(set, "emergency_taps", c->emerg_taps);
+    cJSON_AddNumberToObject(set, "emergency_taps_lo", APP_EMERGENCY_TAPS_LO);
+    cJSON_AddNumberToObject(set, "emergency_taps_hi", APP_EMERGENCY_TAPS_HI);
+    cJSON_AddNumberToObject(set, "emergency_gap_ms", APP_EMERGENCY_GAP_MS);
+    int em_slot;
+    int64_t em_ago;
+    if (app_emergency_last(&em_slot, &em_ago)) {
+        cJSON *em = cJSON_AddObjectToObject(set, "emergency_last");
+        cJSON_AddNumberToObject(em, "slot", em_slot);
+        cJSON_AddNumberToObject(em, "ago_s", (double)(em_ago / 1000));
+    }
     bedtime_json(cJSON_AddObjectToObject(o, "bedtime"), &c->bedtime);
     pins_json(cJSON_AddObjectToObject(o, "pins"), &c->pins);
     secret_json(cJSON_AddObjectToObject(o, "secret"), &c->secret);
@@ -804,9 +815,9 @@ static esp_err_t h_contacts(httpd_req_t *req)
     return send_msg(req, "200 OK", true, "Saved.");
 }
 
-/* POST /api/settings {max_call_minutes, lang}: phone-only settings, no
- * Twilio. Either field may be left out; both are checked before either is
- * saved. */
+/* POST /api/settings {max_call_minutes, lang, emergency_taps}: phone-only
+ * settings, no Twilio. Any field may be left out; all are checked before any
+ * is saved. emergency_taps 0 or null = off. */
 static esp_err_t h_settings(httpd_req_t *req)
 {
     if (!post_ok(req)) {
@@ -818,11 +829,14 @@ static esp_err_t h_settings(httpd_req_t *req)
     }
     const cJSON *v = cJSON_GetObjectItem(j, "max_call_minutes");
     const cJSON *l = cJSON_GetObjectItem(j, "lang");
+    const cJSON *e = cJSON_GetObjectItem(j, "emergency_taps");
     bool num = cJSON_IsNumber(v);
     double m = num ? v->valuedouble : 0;
     prompt_lang_t lang = cJSON_IsString(l) ? prompt_lang_from_code(l->valuestring) : PROMPT_LANG_COUNT;
+    const bool e_ok = cJSON_IsNull(e) || cJSON_IsNumber(e);
+    const double et = cJSON_IsNumber(e) ? e->valuedouble : 0;
     cJSON_Delete(j);
-    if (!v && !l) {
+    if (!v && !l && !e) {
         return send_msg(req, "400 Bad Request", false, "Nothing to save.");
     }
     if (v && (!num || m != (double)(int)m || m < APP_CALL_MAX_MIN_LO || m > APP_CALL_MAX_MIN_HI)) {
@@ -832,6 +846,13 @@ static esp_err_t h_settings(httpd_req_t *req)
     }
     if (l && lang == PROMPT_LANG_COUNT) {
         return send_msg(req, "400 Bad Request", false, "Pick English, Catalan or Spanish.");
+    }
+    if (e && (!e_ok || et != (double)(int)et ||
+              (et != 0 && (et < APP_EMERGENCY_TAPS_LO || et > APP_EMERGENCY_TAPS_HI)))) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "Leave it empty to turn it off, or pick %d to %d presses.", APP_EMERGENCY_TAPS_LO,
+                 APP_EMERGENCY_TAPS_HI);
+        return send_msg(req, "400 Bad Request", false, msg);
     }
     if (v) {
         if (config_set_max_call_minutes((unsigned)m) != ESP_OK) {
@@ -845,6 +866,12 @@ static esp_err_t h_settings(httpd_req_t *req)
         }
         prompt_set_lang(lang);
         ESP_LOGI(TAG, "prompt language set to %s from the web page", prompt_lang_code(lang));
+    }
+    if (e) {
+        if (config_set_emergency_taps((unsigned)et) != ESP_OK) {
+            return send_msg(req, "500 Internal Server Error", false, "Could not save. Try again.");
+        }
+        ESP_LOGI(TAG, "emergency override set to %d presses (0 = off) from the web page", (int)et);
     }
     return send_msg(req, "200 OK", true, "Saved.");
 }

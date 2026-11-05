@@ -330,6 +330,11 @@ static void load(void)
     if (nvs_get_u8(h, "lang", &lang) == ESP_OK && lang < PROMPT_LANG_COUNT) {
         s_cfg.lang = lang;
     }
+    /* Missing (every phone before 0.7.3) or out of range = off. */
+    uint8_t et = 0;
+    if (nvs_get_u8(h, "emerg_taps", &et) == ESP_OK && et >= APP_EMERGENCY_TAPS_LO && et <= APP_EMERGENCY_TAPS_HI) {
+        s_cfg.emerg_taps = et;
+    }
     uint8_t p = 0;
     nvs_get_u8(h, "provisioned", &p);
     /* Only trust the flag if the SIP account and a contact are really there. */
@@ -899,6 +904,41 @@ esp_err_t config_set_lang(uint8_t lang)
     nvs_close(h);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "saving the language failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+uint8_t config_emergency_taps(void)
+{
+    lock();
+    uint8_t t = s_cfg.emerg_taps;
+    unlock();
+    return t;
+}
+
+esp_err_t config_set_emergency_taps(unsigned taps)
+{
+    if (taps != 0 && (taps < APP_EMERGENCY_TAPS_LO || taps > APP_EMERGENCY_TAPS_HI)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    lock();
+    err = taps == 0 ? erase_key(h, "emerg_taps") : nvs_set_u8(h, "emerg_taps", (uint8_t)taps);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    if (err == ESP_OK) {
+        s_cfg.emerg_taps = (uint8_t)taps;
+    }
+    s_gen++;
+    unlock();
+    nvs_close(h);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "saving the emergency presses failed: %s", esp_err_to_name(err));
     }
     return err;
 }

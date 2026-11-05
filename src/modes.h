@@ -1,5 +1,8 @@
 #pragma once
 
+#include <stdbool.h>
+#include <stdint.h>
+
 typedef enum {
     MODE_A_WIDEBAND_LOOPBACK = 0,
     MODE_B_TELEPHONE_LOOPBACK,
@@ -14,6 +17,7 @@ typedef enum {
     MODE_PROMPT,                /* a spoken prompt (prompts.h), then the idle sound again */
     MODE_BEEP,                  /* secret message: one short beep (start, or time's up), then silence */
     MODE_SECRET,                /* secret message: recording the mic, earpiece silent (secret.h) */
+    MODE_EMERGENCY,             /* emergency override reached: rising notes, then the call */
     MODE_COUNT
 } app_mode_t;
 
@@ -21,8 +25,12 @@ typedef enum {
  * and the test mode selection. Read by the audio task every block. */
 app_mode_t app_mode_get(void);
 const char *app_mode_name(app_mode_t m);
-/* Short label for logs: "A".."D", "CALL", "RING", "SETUP", "BUSY", "NOWIFI", "PROMPT", "BEEP", "SECRET". */
+/* Short label for logs: "A".."D", "CALL", "RING", "SETUP", "BUSY", "NOWIFI", "PROMPT", "BEEP", "SECRET", "EMERG". */
 const char *app_mode_short(app_mode_t m);
+
+/* Last emergency override since boot (main.c, RAM only): false if none,
+ * else the button's slot and how long ago it fired. Any task. */
+bool app_emergency_last(int *slot, int64_t *ago_ms);
 
 /* Factory reset (main.c): stop any call, erase the config (NVS namespace and
  * the WiFi driver's copy), reboot into setup. Does not return. source is for

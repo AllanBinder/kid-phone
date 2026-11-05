@@ -22,6 +22,12 @@
  *   dedicated                 idle: a press starts a secret (no number)
  *   while recording           a press of the same button stops it
  * In a call every button still hangs up on the press edge.
+ * Emergency override (off unless the parent sets a count, config_emergency_taps):
+ *   the same button pressed that many times, each press within
+ *   APP_EMERGENCY_GAP_MS of the last, calls that person even at bedtime or
+ *   outside their hours: the emergency tone first, then the call. A run of
+ *   presses hears its "can't call" prompt once, and the call a run starts
+ *   is not hung up by the rest of that run.
  * The board's BOOT button (APP_BOOT_GPIO, out of a child's reach):
  *   idle, short press         cycle the stage 1 audio test modes A-D
  *   hold 10 s                 factory reset (erase config, reboot into setup);
@@ -72,9 +78,27 @@ static _Atomic int64_t s_busy_until_ms;
  * ends or fails). */
 static _Atomic int64_t s_cooldown_until_ms;
 
+/* Emergency tone until then (APP_EMERGENCY_TONE_MS once the override is
+ * reached); the button task places the call when it ends. */
+static _Atomic int64_t s_em_tone_until_ms;
+/* Last override since boot, for the setup page: slot (-1 = none) and when. */
+static _Atomic int s_em_last_slot = -1;
+static _Atomic int64_t s_em_last_ms;
+
 static int64_t now_ms(void)
 {
     return esp_timer_get_time() / 1000;
+}
+
+bool app_emergency_last(int *slot, int64_t *ago_ms)
+{
+    const int s = atomic_load(&s_em_last_slot);
+    if (s < 0) {
+        return false;
+    }
+    *slot = s;
+    *ago_ms = now_ms() - atomic_load(&s_em_last_ms);
+    return true;
 }
 
 app_mode_t app_mode_get(void)
@@ -85,6 +109,11 @@ app_mode_t app_mode_get(void)
     }
     if (cs != CALL_IDLE) {
         return MODE_CALL;
+    }
+    /* Before the prompt: the tone cuts off a "can't call" prompt still
+     * playing (the audio task drops it). */
+    if (now_ms() < atomic_load(&s_em_tone_until_ms)) {
+        return MODE_EMERGENCY;
     }
     if (prompt_active()) {
         return MODE_PROMPT;
@@ -134,13 +163,14 @@ const char *app_mode_name(app_mode_t m)
     case MODE_PROMPT: return "spoken prompt";
     case MODE_BEEP: return "secret message beep";
     case MODE_SECRET: return "secret message recording (mic -> PSRAM)";
+    case MODE_EMERGENCY: return "emergency tone (C5 E5 G5 C6, twice)";
     default: return "?";
     }
 }
 
 const char *app_mode_short(app_mode_t m)
 {
-    static const char *k[] = {"A", "B", "C", "D", "CALL", "RING", "SETUP", "BUSY", "NOWIFI", "PROMPT", "BEEP", "SECRET"};
+    static const char *k[] = {"A", "B", "C", "D", "CALL", "RING", "SETUP", "BUSY", "NOWIFI", "PROMPT", "BEEP", "SECRET", "EMERG"};
     _Static_assert(sizeof(k) / sizeof(k[0]) == MODE_COUNT, "mode names out of sync");
     return (unsigned)m < MODE_COUNT ? k[m] : "?";
 }
@@ -226,8 +256,155 @@ static bool press_blocked(int idx)
     return false;
 }
 
+/*
+ * Runs of presses (button task only). Every contact press edge outside a
+ * secret goes through run_press() first. A press of the same button within
+ * APP_EMERGENCY_GAP_MS of the one before continues the run; anything else
+ * starts a new one. A run:
+ *   - hears why it cannot call once (bedtime, outside their hours, ...);
+ *     the rest of its presses are counted quietly, so a child pressing on
+ *     never piles up prompts;
+ *   - with the override on, reaching config_emergency_taps() presses calls
+ *     past bedtime and the schedule (emergency_fire);
+ *   - with the override on, a call it started (emergency or normal) is not
+ *     hung up by the rest of the run, on any button: the child was told to
+ *     keep pressing. A pause longer than the gap, then a press, hangs up.
+ */
+typedef enum {
+    RUN_COUNTING = 0,
+    RUN_CALLING, /* this run started a call: its later presses are ignored while it lasts */
+    RUN_SPENT,   /* reached the count but could not call (no WiFi, not set up): quiet */
+} run_state_t;
+
+typedef struct {
+    int slot;        /* button of the run, -1 = none */
+    int count;       /* presses so far */
+    int64_t last_ms; /* the last press of the run */
+    int64_t call_ms; /* when the run asked for its call (RUN_CALLING) */
+    bool told;       /* the run already heard its "can't call" prompt */
+    run_state_t state;
+} press_run_t;
+
+static press_run_t s_run = {.slot = -1};
+/* Slot to call once the emergency tone ends, -1 = none. */
+static int s_em_call = -1;
+
+/* Starts a call for the current run's slot: the run's presses that follow
+ * are then ignored while the call lasts (override on only). */
+static void run_calling(int idx)
+{
+    if (config_emergency_taps() > 0 && s_run.slot == idx) {
+        s_run.state = RUN_CALLING;
+        s_run.call_ms = now_ms();
+    }
+}
+
+/* True if this press is part of a run that already started a call or is
+ * spent, and must do nothing. Otherwise it is counted (or starts a run). */
+static bool run_press(int idx)
+{
+    const int64_t now = now_ms();
+    const bool quick = s_run.slot >= 0 && now - s_run.last_ms <= APP_EMERGENCY_GAP_MS;
+    if (s_em_call >= 0) {
+        s_run.last_ms = now; /* the tone is playing: nothing interrupts it */
+        return true;
+    }
+    if (quick && s_run.state == RUN_CALLING) {
+        /* The SIP task takes a moment to leave IDLE after the request. */
+        const bool live = sip_call_state() != CALL_IDLE || now - s_run.call_ms < 1000;
+        if (live) {
+            s_run.last_ms = now;
+            ESP_LOGI(TAG, "BUTTON %d: ignored, the call this run started is going", idx);
+            return true;
+        }
+    }
+    if (quick && s_run.state == RUN_SPENT && idx == s_run.slot) {
+        s_run.last_ms = now;
+        return true;
+    }
+    if (quick && idx == s_run.slot && s_run.state == RUN_COUNTING) {
+        s_run.count++;
+    } else {
+        s_run = (press_run_t){.slot = idx, .count = 1};
+    }
+    s_run.last_ms = now;
+    return false;
+}
+
+/* The run reached the override count. Only bedtime and the contact's hours
+ * are overridden: with nothing to override this returns false and the press
+ * goes the usual way (a call, or ignored during the cooldown). No WiFi or
+ * Twilio not set up still fail with their prompt, once. */
+static bool emergency_fire(int idx)
+{
+    cfg_contact_t c;
+    if (!config_get_contact(idx, &c)) {
+        return false; /* empty slot or secret button: nobody to call */
+    }
+    cfg_bedtime_t bed;
+    bedtime_state_t bst;
+    config_get_bedtime(&bed);
+    schedule_bedtime_eval(&bed, &bst);
+    sched_state_t st;
+    schedule_eval(&c.sched, &st);
+    if (!bst.active && st.available) {
+        return false;
+    }
+    if (!wifi_is_connected() || !config_is_provisioned()) {
+        ESP_LOGW(TAG, "BUTTON %d: emergency override after %d presses, but the phone cannot call", idx, s_run.count);
+        s_run.state = RUN_SPENT;
+        feedback(wifi_is_connected() ? PROMPT_NOT_READY : PROMPT_NO_WIFI, 0);
+        return true;
+    }
+    ESP_LOGW(TAG, "BUTTON %d: EMERGENCY override after %d quick presses (%s): tone, then call %s", idx, s_run.count,
+             bst.active ? "bedtime" : "outside their hours", c.name);
+    atomic_store(&s_test_mode, -1);
+    atomic_store(&s_busy_until_ms, 0);
+    atomic_store(&s_em_tone_until_ms, now_ms() + APP_EMERGENCY_TONE_MS);
+    atomic_store(&s_em_last_ms, now_ms());
+    atomic_store(&s_em_last_slot, idx);
+    s_em_call = idx;
+    run_calling(idx);
+    return true;
+}
+
+/* The tone has ended: place the emergency call (unless something else, a
+ * test call from the setup page, got there first). */
+static void emergency_poll(void)
+{
+    if (s_em_call < 0 || now_ms() < atomic_load(&s_em_tone_until_ms)) {
+        return;
+    }
+    const int idx = s_em_call;
+    s_em_call = -1;
+    if (sip_call_state() != CALL_IDLE || secret_active()) {
+        ESP_LOGW(TAG, "BUTTON %d: emergency call not placed, the phone is busy", idx);
+        return;
+    }
+    s_run.call_ms = now_ms();
+    sip_call_contact(idx);
+}
+
+/* A refusal: the prompt once per run, then quiet (see press_run_t). */
+static void refuse(int idx, prompt_id_t p, int busy_ms)
+{
+    if (s_run.slot == idx) {
+        s_run.told = true;
+    }
+    feedback(p, busy_ms);
+}
+
 static void on_press_idle(int idx)
 {
+    const bool run = s_run.slot == idx && s_run.state == RUN_COUNTING;
+    const int need = config_emergency_taps();
+    if (need > 0 && run && s_run.count >= need && emergency_fire(idx)) {
+        return;
+    }
+    if (run && s_run.told) {
+        ESP_LOGI(TAG, "BUTTON %d: press %d of a run, already told why not", idx, s_run.count);
+        return;
+    }
     if (press_blocked(idx)) {
         return;
     }
@@ -239,30 +416,30 @@ static void on_press_idle(int idx)
     schedule_bedtime_eval(&bed, &bst);
     if (bst.active) {
         ESP_LOGI(TAG, "BUTTON %d: bedtime, busy tone", idx);
-        feedback(PROMPT_SLEEP_TIME, APP_SHORT_BUSY_MS);
+        refuse(idx, PROMPT_SLEEP_TIME, APP_SHORT_BUSY_MS);
         return;
     }
     if (!wifi_is_connected()) {
         ESP_LOGW(TAG, "BUTTON %d: no WiFi yet, cannot call", idx);
-        feedback(PROMPT_NO_WIFI, 0);
+        refuse(idx, PROMPT_NO_WIFI, 0);
         return;
     }
     if (!config_is_provisioned()) {
         ESP_LOGW(TAG, "BUTTON %d: not set up yet, open http://%s.local/", idx, APP_HOSTNAME);
-        feedback(PROMPT_NOT_READY, 0);
+        refuse(idx, PROMPT_NOT_READY, 0);
         return;
     }
     cfg_contact_t c;
     if (!config_get_contact(idx, &c)) {
         ESP_LOGW(TAG, "BUTTON %d: no contact in this slot, busy tone", idx);
-        feedback(PROMPT_NOT_READY, APP_SHORT_BUSY_MS);
+        refuse(idx, PROMPT_NOT_READY, APP_SHORT_BUSY_MS);
         return;
     }
     sched_state_t st;
     schedule_eval(&c.sched, &st);
     if (!st.available) {
         ESP_LOGI(TAG, "BUTTON %d: %s is outside their available hours, busy tone", idx, c.name);
-        feedback(PROMPT_UNAVAILABLE, APP_SHORT_BUSY_MS);
+        refuse(idx, PROMPT_UNAVAILABLE, APP_SHORT_BUSY_MS);
         return;
     }
     if (st.scheduled && !schedule_time_synced()) {
@@ -271,6 +448,7 @@ static void on_press_idle(int idx)
     ESP_LOGI(TAG, "BUTTON %d: call %s", idx, c.name);
     atomic_store(&s_test_mode, -1); /* back to the normal idle sound after the call */
     atomic_store(&s_busy_until_ms, 0);
+    run_calling(idx);
     sip_call_contact(idx);
 }
 
@@ -384,7 +562,8 @@ static int button_debounce(button_t *b)
  * calls, held that long it starts a secret (and the release then does
  * nothing). In every mode a press during a call hangs up, and a press while
  * a secret is going goes to secret_press() (stops the recording on its own
- * button, ignored on the others).
+ * button, ignored on the others). Outside a secret every press edge is
+ * counted in a run first (run_press), which may swallow it.
  */
 static void contact_button_poll(int idx, button_t *b, uint8_t mode, bool *armed)
 {
@@ -401,6 +580,7 @@ static void contact_button_poll(int idx, button_t *b, uint8_t mode, bool *armed)
     if (edge != 1) {
         if (*armed && b->stable == 0 && b->held_ms >= APP_SECRET_HOLD_MS) {
             *armed = false;
+            s_run.slot = -1; /* a hold is not a quick press: the run is over */
             if (sip_call_state() == CALL_IDLE && !secret_active()) {
                 on_secret_idle(idx);
             }
@@ -408,6 +588,11 @@ static void contact_button_poll(int idx, button_t *b, uint8_t mode, bool *armed)
         return;
     }
     *armed = false;
+    if (secret_active()) {
+        s_run.slot = -1;
+    } else if (run_press(idx)) {
+        return; /* part of a run that started a call, or is spent */
+    }
     if (sip_call_state() != CALL_IDLE) {
         ESP_LOGI(TAG, "BUTTON %d: hang up (state %s)", idx, sip_call_state_name(sip_call_state()));
         sip_call_hangup();
@@ -535,6 +720,7 @@ static void button_task(void *arg)
                 }
             }
         }
+        emergency_poll();
         if (secret_poll()) {
             atomic_store(&s_cooldown_until_ms, now_ms() + APP_PRESS_COOLDOWN_MS);
         }

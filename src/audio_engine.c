@@ -374,6 +374,39 @@ static void cadence_tone(int16_t *out, size_t n, uint32_t rate, float f1, float 
     }
 }
 
+/*
+ * Emergency tone: four rising notes, a rest, the four again, one note slot
+ * of APP_EMERGENCY_NOTE_MS each (APP_EMERGENCY_TONE_MS in all), then silence
+ * until the mode changes. Every note ramps up and down like the cadence
+ * tones. E.ring_pos counts samples from the start (reset on the mode change).
+ */
+static void emergency_tone(int16_t *out, size_t n, uint32_t rate)
+{
+    static const float k_notes[] = {523.25f, 659.25f, 783.99f, 1046.5f, 0.0f,
+                                    523.25f, 659.25f, 783.99f, 1046.5f};
+    const uint32_t slot = rate * APP_EMERGENCY_NOTE_MS / 1000;
+    const uint32_t r = rate * APP_TONE_RAMP_MS / 1000;
+    const float two_pi = 6.28318530718f;
+    const float a = APP_EMERGENCY_AMPL * 32767.0f;
+    for (size_t i = 0; i < n; i++) {
+        const uint32_t k = E.ring_pos / slot;
+        const uint32_t p = E.ring_pos % slot;
+        const float f = k < sizeof(k_notes) / sizeof(k_notes[0]) ? k_notes[k] : 0.0f;
+        float g = 0.0f;
+        if (f > 0.0f) {
+            g = p < r ? (float)p / r : p >= slot - r ? (float)(slot - p) / r : 1.0f;
+            E.ph1 += two_pi * f / rate;
+            if (E.ph1 > two_pi) {
+                E.ph1 -= two_pi;
+            }
+        }
+        out[i] = (int16_t)(a * g * sinf(E.ph1));
+        if (E.ring_pos < UINT32_MAX) {
+            E.ring_pos++;
+        }
+    }
+}
+
 /* Next block of the playing prompt. Past the end of the clip one more block
  * of silence flushes the interpolator, then the prompt is reported done. */
 static void prompt_block(int16_t *out, size_t out_n)
@@ -414,7 +447,7 @@ static void prompt_stop(const char *why)
 static bool is_tone_mode(app_mode_t m)
 {
     return m == MODE_C_DIAL_TONE || m == MODE_RINGBACK || m == MODE_SETUP_NEEDED || m == MODE_BUSY ||
-           m == MODE_NO_WIFI || m == MODE_BEEP;
+           m == MODE_NO_WIFI || m == MODE_BEEP || m == MODE_EMERGENCY;
 }
 
 /* Secret message recording: everything the mic ring holds goes to the
@@ -499,6 +532,9 @@ static void render_block(app_mode_t mode, size_t out_n)
         break;
     case MODE_SECRET:
         secret_block(s_blk_out, out_n);
+        break;
+    case MODE_EMERGENCY:
+        emergency_tone(s_blk_out, out_n, E.spk.rate);
         break;
     case MODE_CALL:
         if (E.tel_ok) {
@@ -602,7 +638,7 @@ static void audio_task(void *arg)
             }
 
             if (prompt_active() && mode != MODE_PROMPT) {
-                prompt_stop("call");
+                prompt_stop(mode == MODE_EMERGENCY ? "emergency tone" : "call");
             } else if (prompt_active() && (!E.have_spk || !E.prompt_ok)) {
                 prompt_stop(E.have_spk ? "earpiece rate" : "no earpiece");
             }

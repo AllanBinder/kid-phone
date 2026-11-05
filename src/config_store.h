@@ -48,6 +48,8 @@
  *   sec_bed                    u8, 1 = secrets allowed at bedtime (missing = no)
  *   lang                       u8, language of the spoken prompts (prompt_lang_t: 1 = Catalan,
  *                              2 = Spanish); missing = English (0 is erased, not written)
+ *   emerg_taps                 u8, quick presses of one button that call past bedtime and the
+ *                              schedule (APP_EMERGENCY_TAPS_LO..HI); missing = off (0 is erased)
  * Every secret key is optional: a phone set up before 0.6.0 has none, and
  * missing keys mean the feature is off. Empty values are erased, not written
  * (24 slots of empty keys would fill the small NVS partition).
@@ -179,6 +181,7 @@ typedef struct {
     cfg_pins_t pins;
     cfg_secret_t secret;
     uint8_t lang;          /* prompt_lang_t, PROMPT_LANG_EN if missing or unknown */
+    uint8_t emerg_taps;    /* emergency override presses, 0 = off */
 } app_cfg_t;
 
 /* Init NVS flash, load the namespace, seed from secrets.h if present and
@@ -263,6 +266,12 @@ esp_err_t config_set_max_call_minutes(unsigned minutes);
  * prompt_set_lang(). */
 uint8_t config_lang(void);
 esp_err_t config_set_lang(uint8_t lang);
+
+/* Presses of one button, each within APP_EMERGENCY_GAP_MS of the last, that
+ * call that person even at bedtime or outside their hours (0 = off), and
+ * setting it (ESP_ERR_INVALID_ARG unless 0 or APP_EMERGENCY_TAPS_LO..HI). */
+uint8_t config_emergency_taps(void);
+esp_err_t config_set_emergency_taps(unsigned taps);
 
 /* Bedtime and the home time zone, and saving them (device only, no Twilio).
  * The caller validates first (schedule_bedtime_validate). */

@@ -119,6 +119,27 @@ pressing the button again calls back. After any call ends, presses are
 ignored for 3 seconds, and while the phone is talking, so a child mashing
 the buttons cannot place a burst of calls.
 
+**Emergency calls** (optional, off by default): on the setup page's
+**Emergency calls** card, type a number of presses (15 to 20 works well;
+5 to 50 allowed, empty = off) and press **Save**. Then pressing the same
+button that many times in a row, each press less than 1.5 seconds after the
+last, calls that person even at bedtime or outside their available times.
+Just before the call the phone plays a short rising tune (four notes going
+up, twice, about 1.4 s) that it plays for nothing else, so you can tell your
+child: "If you really need me, keep pressing my button until you hear the
+music." A longer pause, or a press of another button, starts the count
+over. What the child hears on the way: the first press says why it cannot
+call ("It's sleep time", "They can't talk right now") with the short busy
+tone as usual; the presses after it are counted quietly, without the
+sentence again. A person who is available is called on the first press, as
+always. While emergency calls are on, a call a button has just made is not
+hung up by more quick presses (the child was told to keep pressing): to hang
+up, wait a moment, then press. It still needs WiFi and a phone that is set
+up (otherwise the usual "isn't connected" or "isn't ready" sentence plays),
+and a secret-only button never makes emergency calls. The card shows when it
+was last used ("Last used: button 2 (Mom), 5 min ago", until the phone
+restarts). The phone does not email anyone about it.
+
 **Bedtime** (optional, off by default): on the setup page's **Bedtime**
 card, turn on "Put the phone to sleep at night" and set when the lights go
 off and come back on (say 19:30 to 07:00; a window that ends earlier than
@@ -188,7 +209,7 @@ for 10 s (factory reset) and set the phone up from step 1.
 `RESET` and press **Factory reset**. Or hold the **BOOT** button on the
 phone's board for 10 seconds (the light blinks amber from 1.5 s on; let go
 before 10 s to cancel). Either way the phone forgets everything (all saved
-WiFi networks, Twilio connection, people, times, call length, bedtime, secret message email) and restarts ready for step 1
+WiFi networks, Twilio connection, people, times, call length, emergency calls, bedtime, secret message email) and restarts ready for step 1
 above. Nothing in your Twilio account is deleted. The contact buttons cannot
 reset the phone: holding them does nothing.
 
@@ -216,6 +237,7 @@ What the lights and the earpiece tell you:
 | that person's light blinks | white pulsing | ringback, then the call | in a call |
 | | | spoken sentence, then busy (480 + 620 Hz, 500 ms on/off) for 5 s | the last call failed |
 | | | spoken sentence, then busy for 2.5 s | bedtime, the button pressed has nobody set up, or the person is outside their available hours |
+| | | four rising notes, twice, then ringback | emergency calls: the button was pressed enough times in a row, the phone is calling past bedtime or their hours |
 | | amber fast blink | | BOOT button held: keep holding for 10 s to erase everything, let go to cancel |
 
 No lights at all means the phone is not working (no WiFi, not set up, no
@@ -405,6 +427,7 @@ All runtime config lives in NVS, namespace `kidphone` (`src/config_store.c`):
 | `smtp_from`, `kid_name` | str | same; sender name on the email (missing = "Kid Phone") and the child's name for the subject (missing = none); erased when empty |
 | `sec_max_s`, `sec_cap_hr`, `sec_bed` | u16, u8, u8 | same; longest secret 10..120 s (missing = 60), secrets per hour 1..20 (missing = 5), 1 = allowed at bedtime (missing = no; erased when off) |
 | `lang` | u8 | `POST /api/settings`; language of the spoken prompts (`prompt_lang_t`): 1 = Catalan, 2 = Spanish. Missing (also every phone before 0.7.0) = English; erased when set back to English |
+| `emerg_taps` | u8 | `POST /api/settings`; emergency override, quick presses of one button that call past bedtime and the schedule, 5..50. Missing (also every phone before 0.7.3) or out of range = off; erased when turned off |
 
 Schedule blob (`sched_blob_t` in `config_store.c`, packed, little endian):
 `version` u8 (1), `enabled` u8, `nwin` u8, `tz` char[48] (POSIX TZ rule),
@@ -534,10 +557,10 @@ phone only has the station interface, so it is only reachable on the home LAN.
 | Endpoint | What |
 |---|---|
 | `GET /` | setup page |
-| `GET /api/status` | `secret` {`configured` (host, login and password saved), `smtp_host`, `smtp_port`, `smtp_security` ("tls" or "starttls"), `smtp_user`, `has_password` (never the password), `from_name`, `kid_name`, `max_seconds`, `hourly_cap`, `bedtime_ok` and the bounds, `last` {`seq`, `state` (none, recording, queued, sending, retrying, sent, failed, discarded), `message`, `slot`, `seconds`, `ago_s`, `utc` when recorded}, `test` {`seq`, `state`, `message`}, `last_hour`, `waiting`, `recording`}, each contact's `secret` ("off", "hold", "dedicated") and `email`, `settings` {`max_call_minutes` and its bounds, `lang` ("en", "ca", "es")}, `bedtime` {`enabled`, `start`, `end` ("HH:MM", home time), `tz`, `tz_name`, `scheduled` = on with a valid home time zone, `active` = asleep now}, WiFi, Twilio (provisioned, caller ID, account SID, SIP user, `login_current`, `numbers_key` = a restricted key is stored), one contact slot per wired button with schedule, `available`, `next` {day, time} in their time zone, `time_synced`, handset, call state and contact, last call result (`code`, `kind`, `message`), setup progress (`state`, `run`, `steps`, on failure `error`, `hint`, `needs_token`) |
+| `GET /api/status` | `secret` {`configured` (host, login and password saved), `smtp_host`, `smtp_port`, `smtp_security` ("tls" or "starttls"), `smtp_user`, `has_password` (never the password), `from_name`, `kid_name`, `max_seconds`, `hourly_cap`, `bedtime_ok` and the bounds, `last` {`seq`, `state` (none, recording, queued, sending, retrying, sent, failed, discarded), `message`, `slot`, `seconds`, `ago_s`, `utc` when recorded}, `test` {`seq`, `state`, `message`}, `last_hour`, `waiting`, `recording`}, each contact's `secret` ("off", "hold", "dedicated") and `email`, `settings` {`max_call_minutes` and its bounds, `lang` ("en", "ca", "es"), `emergency_taps` (0 = off) and its bounds, `emergency_gap_ms`, `emergency_last` {`slot`, `ago_s`} once an override was used since boot}, `bedtime` {`enabled`, `start`, `end` ("HH:MM", home time), `tz`, `tz_name`, `scheduled` = on with a valid home time zone, `active` = asleep now}, WiFi, Twilio (provisioned, caller ID, account SID, SIP user, `login_current`, `numbers_key` = a restricted key is stored), one contact slot per wired button with schedule, `available`, `next` {day, time} in their time zone, `time_synced`, handset, call state and contact, last call result (`code`, `kind`, `message`), setup progress (`state`, `run`, `steps`, on failure `error`, `hint`, `needs_token`) |
 | `POST /api/contacts` | `{contacts:[{name, number, schedule:{enabled, tz, tz_name, windows:[{days, start, end}]}, secret, email} x up to 24]}` (a number or a secret mode on a slot with no button pin: 400; `secret` "hold" needs a number, "dedicated" must have none, either needs a plain `email`). A phone not set up with Twilio can save secret buttons only (no numbers at all) here; saves names, button order and schedules without a token. If the set of numbers differs from what Twilio allows and a numbers key is stored: 202 `{updating: true, run}`, the key run starts (progress in `/api/status`; if Twilio rejects the key it fails with `needs_token`). No key: 409 `{needs_token: true}` |
 | `POST /api/provision` | `{account_sid, auth_token, contacts, full}` (202 `{ok, message, run}`). Already set up with its own login, same account, `full` not true: numbers-only update. Otherwise the full setup. `account_sid` may be omitted once stored. Old `contact_name`/`contact_number` still accepted |
-| `POST /api/settings` | `{max_call_minutes, lang}`, either may be left out (400 if both are): a whole number 1..120, and "en", "ca" or "es" (400 otherwise; nothing is saved if either is bad). A new `lang` applies to the next prompt and the next call's INVITE. No token |
+| `POST /api/settings` | `{max_call_minutes, lang, emergency_taps}`, any may be left out (400 if all are): a whole number 1..120, "en", "ca" or "es", and 0 or null (off) or a whole number 5..50 (400 otherwise; nothing is saved if any is bad). A new `lang` applies to the next prompt and the next call's INVITE, a new `emergency_taps` to the next press. No token |
 | `POST /api/prompt/sample` | `{}`: play "They didn't answer the phone." on the handset in the saved language. 409 without a handset, during a call or while a secret is going |
 | `POST /api/secret` | `{smtp_host, smtp_port, smtp_security, smtp_user, smtp_pass, from_name, kid_name, max_seconds, hourly_cap, bedtime_ok}`: secret message email account and limits. `smtp_pass` missing or empty keeps the saved one (spaces are removed, as app passwords are shown in groups), `clear_password: true` erases it. 400 on a bad host, port, login (must be an email address) or out-of-range limit. Device only, no token |
 | `POST /api/secret/test` | `{}`: a text-only test email to the login's own address with the saved settings; 202, the outcome in `/api/status` `secret.test` (409 if not set up, no WiFi, or an email is already being sent) |
@@ -696,6 +719,51 @@ by bedtime) and an idle press plays `sleep_time` and the short busy tone
 checks). Not synced yet, off, or no valid home time zone: never active, so a
 clock problem never blocks a call. `POST /api/call` skips it on purpose.
 
+### Emergency override
+
+`main.c`, button task only (`run_press()`, `emergency_fire()`,
+`emergency_poll()`). Every contact press edge outside a secret is first
+counted in a **run**: a press of the same button within
+`APP_EMERGENCY_GAP_MS` (1500 ms) of the previous press continues it,
+anything else (a longer gap, another button, a 1.5 s hold on a long-press
+button, a secret starting) starts a new one. Presses count whether or not
+they do anything: during a prompt, the busy tone and the 3 s cooldown alike.
+On a long-press secret button the press edge counts and the call decision
+still comes on the release, so quick taps there work the same.
+
+- A run hears its refusal prompt once (`refuse()` marks it told); its later
+  presses log `press N of a run` and play nothing. This also applies with
+  the override off, so a child pressing on never stacks up prompts.
+- With `emerg_taps` = N > 0, the press that brings the run to N (and any
+  later one in the run) on a contact that is blocked by bedtime or by their
+  schedule fires the override: the busy tone is cleared, `app_mode_get()`
+  reports `MODE_EMERGENCY` for `APP_EMERGENCY_TONE_MS` (1350 ms: C5 E5 G5 C6
+  at 150 ms each, a 150 ms rest, the four again, each note with 5 ms ramps,
+  0.10 of full scale like the secret beep) ahead of `MODE_PROMPT`, so a
+  prompt still playing is dropped, and when the tone ends the button task
+  calls `sip_call_contact()`. The cooldown and a playing prompt do not
+  delay it. Bedtime and the schedule are the only rules it skips: an empty
+  slot or a secret-only button is not overridden, and no WiFi or no Twilio
+  setup play their usual prompt (once; the run is then spent and stays
+  quiet). A contact who is available when the run reaches N is not an
+  override: the press goes the usual way (a call, or ignored in the
+  cooldown). There is no call cap to skip: the only limit on calls is the
+  call length, which still ends an emergency call. `POST /api/call` is
+  unchanged.
+- With N > 0, a call a run started (override or a normal first-press call)
+  is protected from the rest of the run: presses on any contact button that
+  keep coming within the gap are ignored while it lasts (and for 1 s after
+  the request, while the SIP task leaves IDLE), instead of hanging up. The
+  first press after a longer pause hangs up as before. With the override off
+  a quick second press still hangs up, as in every release before 0.7.3.
+- Debounce is unchanged (30 ms stable, 5 ms poll): a tap needs about 30 ms
+  down and 30 ms up, so up to about 15 taps a second are counted.
+- The log line `BUTTON n: EMERGENCY override after N quick presses
+  (bedtime | outside their hours)` and `/api/status` `settings.emergency_last`
+  (RAM only) record it. No email: the SMTP path only exists when secret
+  messages are set up and has no plain notification flow. An idea for later:
+  a text email to the parent through the secret send task.
+
 ### Secret messages
 
 `src/secret.c` (steps, recorder hand-off, queue, send task), `src/smtp.c`
@@ -757,6 +825,9 @@ message plus a hint.
 | idle | short press button i | call contact i (needs WiFi and Twilio setup) |
 | idle | short press, bedtime, slot empty or contact outside their hours | spoken prompt, then busy tone for 2.5 s, no call |
 | idle | short press while a prompt plays, or within 3 s (`APP_PRESS_COOLDOWN_MS`) after a call ended or failed | ignored (button mashing) |
+| idle | more presses of a button within 1.5 s of each other after it said why it cannot call | ignored, no prompt again (counted for emergency calls) |
+| idle | emergency calls on: the same button pressed the set number of times, each within 1.5 s of the last, person asleep or outside their hours | four rising notes twice, then the call (any prompt or busy tone stops) |
+| calling / ringing / in call, emergency calls on | more presses within 1.5 s of each other, right after the button started this call | ignored (pause, then press, to hang up) |
 | calling / ringing / in call | press any button | hang up (CANCEL before answer, BYE after); the 3 s cooldown then starts |
 | in call | call reaches the call length limit (setup page, default 30 min) | BYE, then "Time's up!", then silence |
 | idle | "long press" button: press and release within 1.5 s (`APP_SECRET_HOLD_MS`) | call, on the release |
@@ -796,6 +867,8 @@ What the earpiece plays:
   250 ms on/off), ready = US dial tone (mode C)
 - a press that cannot call: the spoken prompt for it, then (bedtime, empty
   slot or outside their hours) US busy for 2.5 s, then silence
+- emergency override reached: C5 E5 G5 C6 at 150 ms each, a 150 ms rest,
+  the same four again (1.35 s), then the call as usual
 - after a failed call (4xx/5xx/6xx, no response, DNS, not set up), or a call
   Twilio answered and hung up within 5 s: the spoken prompt for it (table in
   Setup), then US busy, 480 + 620 Hz, 500 ms on/off, for 5 s, then silence
@@ -1149,7 +1222,7 @@ after the SIP leg is answered, which is why they show up as a short call.
 ## Layout
 
 ```
-src/main.c            app entry, button task (contact buttons: call / hang up / secret long press or dedicated; applies pin changes live; BOOT: test modes / factory reset), factory reset, effective audio mode
+src/main.c            app entry, button task (contact buttons: call / hang up / secret long press or dedicated / press runs and the emergency override; applies pin changes live; BOOT: test modes / factory reset), factory reset, effective audio mode
 src/pins.c/.h         button and light pins: assignable list, defaults, validation, GPIO setup
 src/contact_leds.c/.h one light per contact (available / off / blinking while called or recording a secret)
 src/secret.c/.h       secret messages: recording steps, mic to PSRAM at 16 kHz, the one queued secret, send task with retries
@@ -1168,7 +1241,7 @@ src/wifi.c/.h         WiFi manager: up to 5 saved networks, strongest visible fi
 src/sip.c/.h          minimal SIP UA over UDP: INVITE + digest auth, CANCEL, BYE, NAT handling, call state
 src/rtp.c/.h          PCMU RTP sender/receiver tasks, jitter buffer, stream buffer to the audio task
 src/usb_audio.c/.h    USB host + UAC driver: hot-plug, descriptor log, format choice, volume/mute
-src/audio_engine.c/.h audio task (core 1): mic jitter ring, modes A-D and CALL, prompt playback, stats
+src/audio_engine.c/.h audio task (core 1): mic jitter ring, modes A-D and CALL, prompt playback, emergency tone, stats
 src/prompts.c/.h      spoken prompt tables (one per language), language setting and play requests (clips embedded from src/prompts/)
 src/prompts/*.pcm     the spoken prompts, 16 kHz mono s16le, made by scripts/gen_prompts.py (<name>.pcm English, <name>_ca.pcm, <name>_es.pcm)
 src/app_config.h      all tunables (assignable and default button and LED GPIOs, block size, volumes, buffers, SIP/RTP ports and timers)
