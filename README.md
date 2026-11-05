@@ -433,13 +433,20 @@ friendly name `kidphone-<suffix> numbers`, the same suffix as the SIP login),
 created through `iam.twilio.com` with exactly this policy:
 
 ```json
-{"allow":["/twilio/serverless/environments/read","/twilio/serverless/variables/list","/twilio/serverless/variables/create","/twilio/serverless/variables/update","/twilio/serverless/deployments/create"]}
+{"allow":["/twilio/serverless/environments/read","/twilio/serverless/builds/read","/twilio/serverless/builds/create","/twilio/serverless/variables/list","/twilio/serverless/variables/create","/twilio/serverless/variables/update","/twilio/serverless/deployments/create"]}
 ```
 
-It can read the environment, set its variables and deploy, which is what a
-number change needs, and nothing else (checked by hand 2026-10-18: calls,
-account, services and functions all answer 401). Worst case for a leaked key:
-someone can change `ALLOWED` / `CALLER_ID` of the call program. The secret is
+It can read the environment, read and create builds, set the variables and
+deploy, which is what a number change needs, and nothing else (checked by
+hand 2026-10-18 for the policy without builds: calls, account, services and
+functions all answer 401). `builds/read` and `builds/create` came in 0.7.2:
+Twilio refuses to deploy the build that is already live (409, error 20409),
+so a number change deploys a copy of it. A key made before 0.7.2 lacks them;
+its first number change fails at the build, the page asks for the Auth Token,
+and that run replaces the key with one that has the current policy. Worst
+case for a leaked key: someone can change `ALLOWED` / `CALLER_ID` of the call
+program, or build and deploy function and asset versions already in the
+service (it cannot upload code). The secret is
 never logged and never returned by any endpoint; `/api/status` only says
 whether a key exists. A factory reset erases it (the key itself stays in the
 Twilio account until the next setup on that account deletes it, or the
@@ -619,16 +626,17 @@ that stops later cannot leave the phone out of step with Twilio.
 
 Numbers-only update with the token (numbers changed on a phone already set
 up with its own login, no usable key): 1, find the `kid-phone` service and
-`prod` environment, set `ALLOWED`, redeploy the environment's current
-`build_sid`, save the contacts, then create the numbers key if none usable
-is stored (phones set up by older firmware get one here). If anything is
+`prod` environment, copy the live build (below), set `ALLOWED`, deploy the
+copy, save the contacts, then replace the numbers key (phones set up by older
+firmware get one here, and a key from before 0.7.2 gets the current policy). If anything is
 missing it falls back to the full run. **Run setup again** on the page
 always does the full run (fresh password, fresh key).
 
 Numbers-only update with the key (the usual case, started by **Save**): no
 account check (the key cannot read the account), `GET` the stored
-environment for its `build_sid`, set `ALLOWED`, deploy, save the contacts.
-On 401 / 403 / 404 (key deleted, service or environment gone) the run fails
+environment for its `build_sid`, copy the live build, set `ALLOWED`, deploy,
+save the contacts. On 401 / 403 / 404 (key deleted, service or environment
+gone, a key from before 0.7.2 that may not build) the run fails
 with `needs_token`, the stored secret is dropped, and the page asks for the
 Auth Token and reruns the update the token way.
 
@@ -640,9 +648,15 @@ the run done and the new numbers stored; any other outcome shows the error
 under **Save** with **Try again** and **Use the Auth Token instead**. The
 status card's **Changing numbers** row shows whether a numbers key is stored.
 
-Both numbers-only updates redeploy the build that is live. A Twilio build
+Both numbers-only updates copy the build that is live: `GET
+Builds/{build_sid}`, then `POST Builds` with the same `FunctionVersions`,
+`AssetVersions`, `Dependencies` and `Runtime`, poll until completed, set
+`ALLOWED`, deploy the new build. Variables only take effect with a
+deployment, and Twilio answers 409 (error 20409, "Environment already has
+requested deployment") to deploying the live build itself, which is why 0.7.1
+and earlier could not change numbers after the first setup. A Twilio build
 holds its function and asset versions, so the no-answer clip stays deployed
-and the key needs no asset permissions. It also means they never install a
+and the key needs no function or asset permissions. It also means they never install a
 newer `voice.js`: only the full run does (hence the "Run setup again" note).
 
 ### Availability schedules and the clock
@@ -1119,6 +1133,16 @@ after the SIP leg is answered, which is why they show up as a short call.
   (the script then reports "already accepts" and does nothing). Read a
   board's flash ID with esptool-js (espressif.github.io/esptool-js) or
   `esptool.py flash_id`.
+- **Number changes failed with HTTP 409 (fixed in 0.7.2, 2026-11-05):**
+  after the first setup, every change to a phone number failed with
+  "Deploying the call program (HTTP 409, Twilio error 20409) Environment
+  already has requested deployment", with the key and with the Auth Token
+  alike (names, bedtime and call length were not affected). The numbers
+  update set `ALLOWED` and then redeployed the build that was already live,
+  which Twilio refuses. It now deploys a copy of the live build (see
+  "Numbers-only update"). A phone set up before 0.7.2 asks for the Auth Token
+  once at its first number change after the update, since its stored key may
+  not create builds; that run stores a key with the new policy.
 - Bring-up logging is off by default: `APP_SIP_LOG_FULL 0`, and the USB host
   debug tags plus the HPRT port probe are behind `APP_USB_DEBUG` (default 0).
 

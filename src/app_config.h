@@ -289,8 +289,8 @@
 /* What a full setup installs in Twilio (voice.js and its assets). Bump it
  * whenever twilio/voice.js or an asset changes: a phone whose stored value
  * (NVS tw_prog, 0 = set up before this marker existed) is lower shows "Run
- * setup again" on the setup page. Numbers-only updates redeploy the build
- * that is live and do not change it.
+ * setup again" on the setup page. Numbers-only updates deploy a copy of the
+ * build that is live and do not change it.
  *   2  (2026-10-18): Dial action, spoken "They didn't answer the phone."
  *   3  (2026-11-02, 0.7.0): no-answer clip and say() lines in the phone's
  *      language (X-Kidphone-Lang header, no-answer-ca / no-answer-es assets) */

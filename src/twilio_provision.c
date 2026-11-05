@@ -32,24 +32,26 @@
  *
  *   8. Replace the phone's restricted "numbers" API key (iam.twilio.com):
  *      delete the stored one, create a new one allowed only to read the
- *      environment, list / create / update its variables and create a
- *      deployment. Its sid, secret and the service / environment sids go to
- *      NVS. A failure here is a warning only: number changes then ask for the
- *      Auth Token as before.
+ *      environment, read and create builds, list / create / update its
+ *      variables and create a deployment. Its sid, secret and the service /
+ *      environment sids go to NVS. A failure here is a warning only: number
+ *      changes then ask for the Auth Token as before.
  *
  * Numbers-only run (contacts changed on an already set up phone): 1, find the
- * service and environment, set ALLOWED, redeploy the environment's current
- * build, save the contacts, create the key if none is stored. Falls back to
- * the full run if anything is missing. A build holds its function and asset
- * versions, so redeploying it keeps the no-answer clip (and keeps whatever
- * older program a phone set up before it has: only a full run installs a
- * new one, see APP_TW_PROGRAM_VERSION).
+ * service and environment, copy the environment's live build into a new
+ * build (same function and asset versions), set ALLOWED, deploy the copy,
+ * save the contacts, replace the key. Falls back to the full run if anything
+ * is missing. Twilio refuses to redeploy the live build itself (409, error
+ * 20409). The copy keeps the no-answer clip (and keeps whatever older
+ * program a phone set up before it has: only a full run installs a new one,
+ * see APP_TW_PROGRAM_VERSION).
  *
  * Key run (contacts changed, key stored, no token): GET the stored
- * environment for its build, set ALLOWED, redeploy, save the contacts. If
- * Twilio answers 401 / 403 / 404 (key revoked, service gone) the run fails
- * with needs_token set, the stored secret is dropped and the page asks for
- * the Auth Token.
+ * environment for its build, copy it, set ALLOWED, deploy, save the
+ * contacts. If Twilio answers 401 / 403 / 404 (key revoked, service gone, a
+ * key from before 0.7.2 without builds permissions) the run fails with
+ * needs_token set, the stored secret is dropped and the page asks for the
+ * Auth Token; that token run makes a new key with the current policy.
  *
  * Not changed by the device: Twilio's per-country Voice geographic permissions
  * (Console > Voice > Settings > Geo permissions). Calls abroad fail until the
@@ -92,9 +94,13 @@ static const char *TAG = "provision";
 #define SLS_UP   "https://serverless-upload.twilio.com/v1/Services"
 #define IAM_KEYS "https://iam.twilio.com/v1/Keys"
 
-/* What the restricted key may do: exactly the numbers-only update. */
+/* What the restricted key may do: exactly the numbers-only update. builds/read
+ * and builds/create (since 0.7.2) copy the live build, since Twilio will not
+ * redeploy the build that is already live. A key made before 0.7.2 lacks
+ * them: its first number change fails at the build and asks for the token. */
 #define KEY_POLICY                                                                                              \
-    "{\"allow\":[\"/twilio/serverless/environments/read\",\"/twilio/serverless/variables/list\","              \
+    "{\"allow\":[\"/twilio/serverless/environments/read\",\"/twilio/serverless/builds/read\","                 \
+    "\"/twilio/serverless/builds/create\",\"/twilio/serverless/variables/list\","                             \
     "\"/twilio/serverless/variables/create\",\"/twilio/serverless/variables/update\","                        \
     "\"/twilio/serverless/deployments/create\"]}"
 
@@ -960,6 +966,55 @@ static void allowed_list(const prov_t *p, char *out, size_t len)
     }
 }
 
+/* Wait for the build p->build_sid to finish. A 4xx while polling (key
+ * without builds/read, build gone) ends the wait at once; transport errors
+ * and 5xx are retried inside get() and then polled again until the timeout. */
+static bool wait_build(prov_t *p)
+{
+    const char *again = p->with_key ? "Press Save again" : "Press Connect again";
+    char hint[200];
+    snprintf(p->url, sizeof(p->url), SLS "/%s/Builds/%s", p->svc_sid, p->build_sid);
+    int waited = 0;
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(APP_PROV_BUILD_POLL_MS));
+        waited += APP_PROV_BUILD_POLL_MS;
+        char status[24] = "";
+        if (get(p, p->url)) {
+            copy_field(p->json, "status", status, sizeof(status));
+        } else if (p->status >= 400 && p->status < 500) {
+            return fail_api(p, "Checking the build");
+        }
+        if (strcmp(status, "completed") == 0) {
+            return true;
+        }
+        if (strcmp(status, "failed") == 0) {
+            snprintf(hint, sizeof(hint),
+                     "%s. If it keeps failing, look at Console > Functions and Assets > Services > kid-phone for the "
+                     "build log.",
+                     again);
+            return fail(p, "Twilio could not build the call program.", hint);
+        }
+        if (waited >= APP_PROV_BUILD_TIMEOUT_MS) {
+            snprintf(hint, sizeof(hint), "Twilio may be slow right now. %s in a few minutes.", again);
+            return fail(p, "The build took too long.", hint);
+        }
+    }
+}
+
+/* Deploy p->build_sid to the environment. Variables only take effect with a
+ * new deployment, and Twilio refuses (409, error 20409) to deploy the build
+ * that is already live, so every caller deploys a build it just made. */
+static bool deploy_build(prov_t *p)
+{
+    p->body[0] = '\0';
+    form_add(p->body, sizeof(p->body), "BuildSid", p->build_sid);
+    snprintf(p->url, sizeof(p->url), SLS "/%s/Environments/%s/Deployments", p->svc_sid, p->env_sid);
+    if (!post_form(p, p->url, p->body)) {
+        return fail_api(p, "Deploying the call program");
+    }
+    return true;
+}
+
 static bool step_serverless(prov_t *p)
 {
     step("Installing the call program in your Twilio account...");
@@ -1026,26 +1081,8 @@ static bool step_serverless(prov_t *p)
     if (!post_form(p, p->url, p->body) || !copy_field(p->json, "sid", p->build_sid, sizeof(p->build_sid))) {
         return fail_api(p, "Starting the build");
     }
-    snprintf(p->url, sizeof(p->url), SLS "/%s/Builds/%s", p->svc_sid, p->build_sid);
-    int waited = 0;
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(APP_PROV_BUILD_POLL_MS));
-        waited += APP_PROV_BUILD_POLL_MS;
-        char status[24] = "";
-        if (get(p, p->url)) {
-            copy_field(p->json, "status", status, sizeof(status));
-        }
-        if (strcmp(status, "completed") == 0) {
-            break;
-        }
-        if (strcmp(status, "failed") == 0) {
-            return fail(p, "Twilio could not build the call program.",
-                        "Press Connect again. If it keeps failing, look at Console > Functions and Assets > "
-                        "Services > kid-phone for the build log.");
-        }
-        if (waited >= APP_PROV_BUILD_TIMEOUT_MS) {
-            return fail(p, "The build took too long.", "Twilio may be slow right now. Press Connect again in a few minutes.");
-        }
+    if (!wait_build(p)) {
+        return false;
     }
     step("Build finished");
 
@@ -1057,11 +1094,8 @@ static bool step_serverless(prov_t *p)
     }
 
     step("Switching it on...");
-    p->body[0] = '\0';
-    form_add(p->body, sizeof(p->body), "BuildSid", p->build_sid);
-    snprintf(p->url, sizeof(p->url), SLS "/%s/Environments/%s/Deployments", p->svc_sid, p->env_sid);
-    if (!post_form(p, p->url, p->body)) {
-        return fail_api(p, "Deploying the call program");
+    if (!deploy_build(p)) {
+        return false;
     }
     /* Twilio now allows exactly these numbers: keep the phone's buttons in
      * step even if the last step fails (an already set up phone would
@@ -1222,28 +1256,92 @@ static void step_buttons(const prov_t *p)
     }
 }
 
-/* Set ALLOWED from p->contacts and redeploy p->build_sid (svc / env set). */
+/* Add param=<sid> to p->body for each version in the array `key` of the
+ * build in p->json. The Builds reference lists them as plain SIDs, its fetch
+ * example as objects with a "sid": both are accepted. Returns the count. */
+static int form_add_versions(prov_t *p, const char *key, const char *param)
+{
+    int n = 0;
+    const cJSON *it;
+    cJSON_ArrayForEach(it, cJSON_GetObjectItem(p->json, key)) {
+        const cJSON *sid = cJSON_IsString(it) ? it : cJSON_GetObjectItem(it, "sid");
+        if (cJSON_IsString(sid) && sid->valuestring[0]) {
+            form_add(p->body, sizeof(p->body), param, sid->valuestring);
+            n++;
+        }
+    }
+    return n;
+}
+
+/* Copy the live build p->build_sid into a new build with the same function
+ * and asset versions, dependencies and runtime, wait for it, and leave its
+ * SID in p->build_sid. Only a new build can be deployed (deploy_build), and
+ * copying the live one keeps whatever program the phone was set up with.
+ * The fetched build is a few KB (one function and three asset versions);
+ * the create form is about 400 bytes, inside p->body. */
+static bool rebuild_live(prov_t *p)
+{
+    snprintf(p->url, sizeof(p->url), SLS "/%s/Builds/%s", p->svc_sid, p->build_sid);
+    if (!get(p, p->url)) {
+        return fail_api(p, "Reading the live build");
+    }
+    p->body[0] = '\0';
+    int n = form_add_versions(p, "function_versions", "FunctionVersions") +
+            form_add_versions(p, "asset_versions", "AssetVersions");
+    /* Dependencies go back as the JSON string Create Build takes; the fetch
+     * answers an array (or, per one docs example, that string). */
+    const cJSON *deps = cJSON_GetObjectItem(p->json, "dependencies");
+    if (cJSON_IsString(deps) && deps->valuestring[0]) {
+        form_add(p->body, sizeof(p->body), "Dependencies", deps->valuestring);
+    } else if (cJSON_IsArray(deps)) {
+        char *js = cJSON_PrintUnformatted(deps);
+        if (js) {
+            form_add(p->body, sizeof(p->body), "Dependencies", js);
+            cJSON_free(js);
+        }
+    } else {
+        form_add(p->body, sizeof(p->body), "Dependencies", APP_PROV_FN_DEPS);
+    }
+    char runtime[16] = "";
+    if (copy_field(p->json, "runtime", runtime, sizeof(runtime))) {
+        form_add(p->body, sizeof(p->body), "Runtime", runtime);
+    }
+    /* form_add truncates silently: a nearly full body may have lost a version. */
+    if (n == 0 || strlen(p->body) + 8 >= sizeof(p->body)) {
+        ESP_LOGE(TAG, "live build %s: %d versions, form %u bytes", p->build_sid, n, (unsigned)strlen(p->body));
+        return fail(p, "Could not copy the call program that is live in Twilio.",
+                    p->with_key ? "Enter your Auth Token and use Run setup again." : "Use Run setup again.");
+    }
+    snprintf(p->url, sizeof(p->url), SLS "/%s/Builds", p->svc_sid);
+    if (!post_form(p, p->url, p->body) || !copy_field(p->json, "sid", p->build_sid, sizeof(p->build_sid))) {
+        return fail_api(p, "Starting the build");
+    }
+    return wait_build(p);
+}
+
+/* Set ALLOWED from p->contacts and make it live (svc / env / build_sid set,
+ * build_sid = the live build): copy the live build, set ALLOWED, deploy the
+ * copy. The build comes first, so a key that may not build (made before
+ * 0.7.2) fails before anything in Twilio changed. */
 static bool push_allowed(prov_t *p)
 {
+    step("Preparing the call program (this can take a minute)...");
+    if (!rebuild_live(p)) {
+        return false;
+    }
     char allowed[ALLOWED_MAX];
     allowed_list(p, allowed, sizeof(allowed));
     if (!set_variable(p, "ALLOWED", allowed)) {
         return false;
     }
-    /* Variables only take effect with a new deployment. */
-    p->body[0] = '\0';
-    form_add(p->body, sizeof(p->body), "BuildSid", p->build_sid);
-    snprintf(p->url, sizeof(p->url), SLS "/%s/Environments/%s/Deployments", p->svc_sid, p->env_sid);
-    if (!post_form(p, p->url, p->body)) {
-        return fail_api(p, "Deploying the call program");
-    }
-    return true;
+    return deploy_build(p);
 }
 
 /*
- * Numbers-only update: find service and environment, set ALLOWED, redeploy
- * the build that is live now. Returns 1 done, 0 failed (error set), -1 fall
- * back to the full setup (something the quick path needs is missing).
+ * Numbers-only update: find service and environment, copy the build that is
+ * live now, set ALLOWED, deploy the copy. Returns 1 done, 0 failed (error
+ * set), -1 fall back to the full setup (something the quick path needs is
+ * missing).
  */
 static int quick_numbers(prov_t *p)
 {
@@ -1279,8 +1377,10 @@ static int quick_numbers(prov_t *p)
     }
     step_buttons(p);
     step("Numbers updated. Twilio takes a few seconds to switch over.");
-    /* Phones set up by older firmware get their key here. */
-    refresh_key(p, false);
+    /* Always a fresh key: phones set up by older firmware get one here, and a
+     * key made before 0.7.2 (no builds permissions) is replaced by one with
+     * the current KEY_POLICY. */
+    refresh_key(p, true);
     return 1;
 }
 
@@ -1311,7 +1411,8 @@ static bool key_unusable(prov_t *p, const char *what)
 /* Numbers-only update with the stored restricted key (no token): stored
  * service and environment, no account check (the key cannot read it).
  * Every request here is inside KEY_POLICY: environments/read (GET the
- * environment), variables/list, variables/update or create (ALLOWED) and
+ * environment), builds/read and builds/create (copy the live build, poll
+ * it), variables/list, variables/update or create (ALLOWED) and
  * deployments/create. Every failure logs its step and HTTP status. */
 static bool key_numbers(prov_t *p)
 {

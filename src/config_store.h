@@ -22,7 +22,8 @@
  *                              wiring (APP_BUTTON_GPIOS / APP_CONTACT_LED_GPIOS)
  *   provisioned                u8, 1 once Twilio setup finished
  *   tw_key_sid, tw_key_sec     restricted Twilio API key (SK... and its secret)
- *                              that can only set ALLOWED and redeploy, so a
+ *                              that can only set ALLOWED and redeploy (copy of
+ *                              the live build), so a
  *                              number change needs no Auth Token
  *   tw_svc, tw_env             Serverless service and environment SIDs that key updates
  *   tw_prog                    u8, APP_TW_PROGRAM_VERSION of the call program the last

@@ -6,7 +6,8 @@
  * Runs in its own task. The Auth Token lives only in that task's RAM and is
  * wiped when the task ends; it is never logged or written to flash.
  * Instead, setup leaves a restricted Twilio API key in NVS that can only set
- * the ALLOWED variable and redeploy, so later number changes need no token.
+ * the ALLOWED variable, copy the live build and deploy it, so later number
+ * changes need no token.
  * The only hosts contacted are api.twilio.com, serverless.twilio.com,
  * serverless-upload.twilio.com and iam.twilio.com.
  */
@@ -25,11 +26,11 @@
  * inputs are unusable.
  *
  * numbers_only: the phone is already set up and only the set of numbers
- * changed. Then only ALLOWED is updated and the deployed build redeployed
- * (a few seconds instead of a minute); if anything the quick path needs is
- * missing in Twilio it falls back to the full setup. Both paths (re)create
- * the restricted numbers key: the full setup always, the quick path when none
- * usable is stored. */
+ * changed. Then only ALLOWED is updated and a copy of the live build
+ * deployed (no uploads, so quicker than the full setup); if anything the
+ * quick path needs is missing in Twilio it falls back to the full setup.
+ * Both paths replace the restricted numbers key, so it always has the
+ * current permissions. */
 bool twilio_provision_start(const char *account_sid, const char *auth_token, const cfg_contact_t *contacts,
                             bool numbers_only);
 
