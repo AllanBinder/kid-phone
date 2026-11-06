@@ -16,6 +16,12 @@
 
 static const char *TAG = "usb_audio";
 
+/* USB host FIFO split, in 4-byte lines (200 total on the ESP32-S3). */
+#define FIFO_NPTX_LINES 16
+#define FIFO_PTX_LINES  96
+#define FIFO_RX_LINES   88
+#define PERIODIC_OUT_MPS_LIMIT (FIFO_PTX_LINES * 4)
+
 /* Rates in order of preference. All are integer multiples of 8 kHz, so the
  * telephone path (mode B) can use a plain integer decimator. */
 static const uint32_t k_pref_rates[] = {48000, 16000, 32000, 24000, 8000};
@@ -233,6 +239,60 @@ static bool pick_format(uac_host_device_handle_t h, uint8_t n_alts, bool is_mic,
  * Open / close
  * ------------------------------------------------------------------------- */
 
+/* Some handsets declare an earpiece (isoc OUT) MPS bigger than the periodic
+ * TX FIFO (e.g. 600 B), and the host refuses to claim the interface ("EP MPS
+ * (600) exceeds supported limit (384)"). The real stream is far smaller
+ * (48 kHz 16-bit stereo = 192 B per 1 ms packet), and an OUT endpoint
+ * accepts any packet up to its MPS, so lowering the host's copy of
+ * wMaxPacketSize to the FIFO limit is safe. It has to happen before
+ * uac_host_device_open(), which caches the MPS, and the claim parses the
+ * same heap copy. IN endpoints are never touched: the device may send up to
+ * its MPS. Uses a short-lived client because the UAC driver's is private. */
+static void clamp_client_cb(const usb_host_client_event_msg_t *msg, void *arg)
+{
+    (void)msg;
+    (void)arg;
+}
+
+static void clamp_earpiece_mps(uint8_t addr)
+{
+    const usb_host_client_config_t ccfg = {
+        .is_synchronous = false,
+        .max_num_event_msg = 2,
+        .async = {.client_event_callback = clamp_client_cb, .callback_arg = NULL},
+    };
+    usb_host_client_handle_t client = NULL;
+    if (usb_host_client_register(&ccfg, &client) != ESP_OK) {
+        ESP_LOGW(TAG, "  MPS check: client register failed");
+        return;
+    }
+    usb_device_handle_t dev = NULL;
+    if (usb_host_device_open(client, addr, &dev) == ESP_OK) {
+        const usb_config_desc_t *cfg = NULL;
+        if (usb_host_get_active_config_descriptor(dev, &cfg) == ESP_OK && cfg) {
+            uint8_t *p = (uint8_t *)cfg; /* host's heap copy, writable */
+            for (uint16_t off = 0; off + 2 <= cfg->wTotalLength && p[off] >= 2; off += p[off]) {
+                if (p[off + 1] != USB_B_DESCRIPTOR_TYPE_ENDPOINT || off + sizeof(usb_ep_desc_t) > cfg->wTotalLength) {
+                    continue;
+                }
+                usb_ep_desc_t *ep = (usb_ep_desc_t *)(p + off);
+                bool isoc_out = (ep->bmAttributes & USB_BM_ATTRIBUTES_XFERTYPE_MASK) == USB_BM_ATTRIBUTES_XFER_ISOC &&
+                                !(ep->bEndpointAddress & USB_B_ENDPOINT_ADDRESS_EP_DIR_MASK);
+                uint16_t mps = USB_EP_DESC_GET_MPS(ep);
+                if (isoc_out && mps > PERIODIC_OUT_MPS_LIMIT) {
+                    ep->wMaxPacketSize = (ep->wMaxPacketSize & ~0x7FF) | PERIODIC_OUT_MPS_LIMIT;
+                    ESP_LOGW(TAG, "  earpiece EP 0x%02X declares MPS %u, clamped to %u (FIFO limit)",
+                             ep->bEndpointAddress, mps, PERIODIC_OUT_MPS_LIMIT);
+                }
+            }
+        }
+        usb_host_device_close(client, dev);
+    } else {
+        ESP_LOGW(TAG, "  MPS check: device open failed");
+    }
+    usb_host_client_deregister(client);
+}
+
 static void open_stream(uint8_t addr, uint8_t iface_num, bool is_mic)
 {
     const char *what = is_mic ? "MIC (RX, device->host)" : "EARPIECE (TX, host->device)";
@@ -251,6 +311,9 @@ static void open_stream(uint8_t addr, uint8_t iface_num, bool is_mic)
         .callback = uac_device_cb,
         .callback_arg = NULL,
     };
+    if (!is_mic) {
+        clamp_earpiece_mps(addr);
+    }
     uac_host_device_handle_t h = NULL;
 #if APP_USB_DEBUG
     /* The driver logs the volume range at debug level during open. */
@@ -399,11 +462,11 @@ static void usb_lib_task(void *arg)
         /* 200-line (800 B) FIFO split by hand: the AB17X earpiece isoc OUT
          * endpoint has MPS 384, too big for the default bias presets.
          * RX 88 lines = 344 B IN MPS (mic), PTX 96 = 384 B (earpiece),
-         * NPTX 16 = 64 B (control). */
+         * NPTX 16 = 64 B (control). Bigger earpiece MPS: clamp_earpiece_mps(). */
         .fifo_settings_custom = {
-            .nptx_fifo_lines = 16,
-            .ptx_fifo_lines = 96,
-            .rx_fifo_lines = 88,
+            .nptx_fifo_lines = FIFO_NPTX_LINES,
+            .ptx_fifo_lines = FIFO_PTX_LINES,
+            .rx_fifo_lines = FIFO_RX_LINES,
         },
     };
 #if APP_USB_DEBUG
