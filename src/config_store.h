@@ -47,7 +47,9 @@
  *   sec_cap_hr                 u8, secrets allowed per hour (missing = APP_SECRET_CAP_DEFAULT)
  *   sec_bed                    u8, 1 = secrets allowed at bedtime (missing = no)
  *   lang                       u8, language of the spoken prompts (prompt_lang_t: 1 = Catalan,
- *                              2 = Spanish); missing = English (0 is erased, not written)
+ *                              2 = Spanish, 3 = French, 4 = Italian, 5 = Dutch, 6 = German,
+ *                              7 = Vietnamese, 8 = Brazilian Portuguese); missing = English
+ *                              (0 is erased, not written)
  *   emerg_taps                 u8, quick presses of one button that call past bedtime and the
  *                              schedule (APP_EMERGENCY_TAPS_LO..HI); missing = off (0 is erased)
  * Every secret key is optional: a phone set up before 0.6.0 has none, and

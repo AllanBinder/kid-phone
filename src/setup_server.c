@@ -1,18 +1,22 @@
 #include "setup_server.h"
 
 #include <ctype.h>
+#include <inttypes.h>
 #include <string.h>
 
 #include "cJSON.h"
 #include "esp_app_desc.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mbedtls/platform_util.h"
 #include "mdns.h"
 
 #include "app_config.h"
+#include "audio_engine.h"
 #include "config_store.h"
 #include "modes.h"
 #include "pins.h"
@@ -24,6 +28,8 @@
 #include "twilio_provision.h"
 #include "usb_audio.h"
 #include "wifi.h"
+
+static void handset_json(cJSON *o);
 
 static const char *TAG = "setup";
 
@@ -373,6 +379,7 @@ static esp_err_t h_status(httpd_req_t *req)
     cJSON_AddBoolToObject(o, "time_synced", schedule_time_synced());
 
     cJSON_AddBoolToObject(o, "handset", usb_audio_handset_connected());
+    handset_json(cJSON_AddObjectToObject(o, "handset_info"));
 
     cJSON *call = cJSON_AddObjectToObject(o, "call");
     cJSON_AddStringToObject(call, "state", sip_call_state_name(sip_call_state()));
@@ -874,6 +881,103 @@ static esp_err_t h_settings(httpd_req_t *req)
         ESP_LOGI(TAG, "emergency override set to %d presses (0 = off) from the web page", (int)et);
     }
     return send_msg(req, "200 OK", true, "Saved.");
+}
+
+/* Handset troubleshooting (Advanced): what the phone sees, and the saved
+ * options (usb_audio.h). */
+static void stream_desc(char *out, size_t cap, const ua_stream_t *s)
+{
+    if (s->active) {
+        snprintf(out, cap, "%" PRIu32 " Hz, %u ch, %u-bit", s->rate, s->channels, s->bits);
+    } else {
+        strlcpy(out, "", cap);
+    }
+}
+
+static void handset_json(cJSON *o)
+{
+    char name[40] = "", spk[40] = "", mic[40] = "";
+    uint16_t vid = 0, pid = 0;
+    if (usb_audio_hs_device(name, sizeof(name), &vid, &pid)) {
+        char id[10];
+        snprintf(id, sizeof(id), "%04x:%04x", vid, pid);
+        cJSON_AddStringToObject(o, "name", name);
+        cJSON_AddStringToObject(o, "id", id);
+    }
+    if (usb_audio_lock(pdMS_TO_TICKS(20))) {
+        const ua_state_t *st = usb_audio_state();
+        stream_desc(spk, sizeof(spk), &st->spk);
+        stream_desc(mic, sizeof(mic), &st->mic);
+        usb_audio_unlock();
+    }
+    cJSON_AddStringToObject(o, "earpiece", spk);
+    cJSON_AddStringToObject(o, "mic", mic);
+    uint8_t layout, flags;
+    usb_audio_hs_get(&layout, &flags);
+    cJSON_AddNumberToObject(o, "layout", layout);
+    cJSON_AddBoolToObject(o, "mic_off", flags & HS_FLAG_MIC_OFF);
+    cJSON_AddBoolToObject(o, "keep_volume", flags & HS_FLAG_KEEP_VOL);
+    cJSON_AddBoolToObject(o, "verbose", flags & HS_FLAG_VERBOSE);
+}
+
+static void restart_cb(void *arg)
+{
+    (void)arg;
+    esp_restart();
+}
+
+/*
+ * POST /api/handset {"action": "tone"}: 3 s test tone on the earpiece (idle only).
+ * POST /api/handset {"layout": 0|1, "mic_off", "keep_volume", "verbose"}:
+ * save the troubleshooting options and restart in 1 s to apply them.
+ */
+static esp_err_t h_handset(httpd_req_t *req)
+{
+    if (!post_ok(req)) {
+        return ESP_OK;
+    }
+    cJSON *j = read_json(req);
+    if (!j) {
+        return send_msg(req, "400 Bad Request", false, "Missing, too large or bad request.");
+    }
+    const cJSON *a = cJSON_GetObjectItem(j, "action");
+    if (cJSON_IsString(a) && strcmp(a->valuestring, "tone") == 0) {
+        cJSON_Delete(j);
+        if (!usb_audio_handset_connected()) {
+            return send_msg(req, "409 Conflict", false, "Plug in the handset first.");
+        }
+        if (sip_call_state() != CALL_IDLE || secret_active()) {
+            return send_msg(req, "409 Conflict", false, "The phone is busy. Try again when it is idle.");
+        }
+        ESP_LOGI(TAG, "test tone from the web page");
+        audio_engine_test_tone(3000);
+        return send_msg(req, "200 OK", true, "Playing a 3 second tone on the handset.");
+    }
+    const cJSON *l = cJSON_GetObjectItem(j, "layout");
+    int layout = cJSON_IsNumber(l) ? l->valueint : -1;
+    uint8_t flags = (cJSON_IsTrue(cJSON_GetObjectItem(j, "mic_off")) ? HS_FLAG_MIC_OFF : 0) |
+                    (cJSON_IsTrue(cJSON_GetObjectItem(j, "keep_volume")) ? HS_FLAG_KEEP_VOL : 0) |
+                    (cJSON_IsTrue(cJSON_GetObjectItem(j, "verbose")) ? HS_FLAG_VERBOSE : 0);
+    cJSON_Delete(j);
+    if (layout < 0 || layout >= HS_LAYOUT_COUNT) {
+        return send_msg(req, "400 Bad Request", false, "Pick a USB buffer layout.");
+    }
+    if (sip_call_state() != CALL_IDLE || secret_active()) {
+        return send_msg(req, "409 Conflict", false, "The phone is busy. Try again when it is idle.");
+    }
+    if (usb_audio_hs_save((uint8_t)layout, flags) != ESP_OK) {
+        return send_msg(req, "500 Internal Server Error", false, "Could not save. Try again.");
+    }
+    ESP_LOGW(TAG, "handset troubleshooting saved: layout %d, flags 0x%02x; restarting", layout, flags);
+    static esp_timer_handle_t t;
+    if (!t) {
+        const esp_timer_create_args_t ta = {.callback = restart_cb, .name = "hs_restart"};
+        esp_timer_create(&ta, &t);
+    }
+    if (t) {
+        esp_timer_start_once(t, 1000 * 1000);
+    }
+    return send_msg(req, "200 OK", true, "Saved. The phone restarts now; this page comes back in about 15 seconds.");
 }
 
 /* POST /api/prompt/sample {}: play one prompt ("They didn't answer the
@@ -1429,7 +1533,7 @@ void setup_server_start(void)
     cfg.server_port = APP_HTTP_PORT;
     cfg.stack_size = APP_HTTP_STACK;
     cfg.max_open_sockets = 5;
-    cfg.max_uri_handlers = 18; /* 17 registered */
+    cfg.max_uri_handlers = 19; /* 18 registered */
     cfg.lru_purge_enable = true;
     cfg.core_id = 0;
     httpd_handle_t srv = NULL;
@@ -1445,6 +1549,7 @@ void setup_server_start(void)
         {.uri = "/api/contacts", .method = HTTP_POST, .handler = h_contacts},
         {.uri = "/api/settings", .method = HTTP_POST, .handler = h_settings},
         {.uri = "/api/prompt/sample", .method = HTTP_POST, .handler = h_prompt_sample},
+        {.uri = "/api/handset", .method = HTTP_POST, .handler = h_handset},
         {.uri = "/api/bedtime", .method = HTTP_POST, .handler = h_bedtime},
         {.uri = "/api/pins", .method = HTTP_POST, .handler = h_pins},
         {.uri = "/api/secret", .method = HTTP_POST, .handler = h_secret},
@@ -1457,7 +1562,7 @@ void setup_server_start(void)
         {.uri = "/api/wifi/add", .method = HTTP_POST, .handler = h_wifi_add},
         {.uri = "/api/wifi/remove", .method = HTTP_POST, .handler = h_wifi_remove},
     };
-    _Static_assert(sizeof(uris) / sizeof(uris[0]) <= 18, "raise max_uri_handlers");
+    _Static_assert(sizeof(uris) / sizeof(uris[0]) <= 19, "raise max_uri_handlers");
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         esp_err_t e = httpd_register_uri_handler(srv, &uris[i]);
         if (e != ESP_OK) {

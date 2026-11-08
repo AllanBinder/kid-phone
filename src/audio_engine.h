@@ -14,4 +14,9 @@
  */
 #pragma once
 
+#include <stdint.h>
+
 void audio_engine_start(void);
+
+/* Handset troubleshooting: 1 kHz tone at half scale on the earpiece for ms. */
+void audio_engine_test_tone(uint32_t ms);

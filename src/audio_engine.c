@@ -2,6 +2,7 @@
 
 #include <inttypes.h>
 #include <math.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -606,6 +607,25 @@ static void print_stats(app_mode_t mode)
     E.peak = 0;
 }
 
+/* Handset troubleshooting: a loud 1 kHz tone on the earpiece, replacing
+ * whatever the mode would play, until this deadline (esp_timer us). */
+static _Atomic int64_t s_tone_until_us;
+static uint32_t s_tone_phase;
+
+void audio_engine_test_tone(uint32_t ms)
+{
+    ESP_LOGI(TAG, "test tone: 1 kHz, half scale, %" PRIu32 " ms", ms);
+    atomic_store(&s_tone_until_us, esp_timer_get_time() + (int64_t)ms * 1000);
+}
+
+static void tone_block(size_t n, uint32_t rate)
+{
+    for (size_t i = 0; i < n; i++) {
+        s_blk_out[i] = (int16_t)(16000.0f * sinf(2.0f * (float)M_PI * (float)s_tone_phase / (float)rate * 1000.0f));
+        s_tone_phase = (s_tone_phase + 1) % rate;
+    }
+}
+
 static void audio_task(void *arg)
 {
     (void)arg;
@@ -649,6 +669,16 @@ static void audio_task(void *arg)
             if (E.have_spk) {
                 const size_t out_n = (size_t)E.spk.rate / 1000 * APP_BLOCK_MS;
                 produce_block(mode, out_n);
+                int64_t tu = atomic_load(&s_tone_until_us);
+                if (tu) {
+                    if (esp_timer_get_time() < tu) {
+                        tone_block(out_n, E.spk.rate);
+                    } else {
+                        atomic_store(&s_tone_until_us, 0);
+                        ESP_LOGI(TAG, "test tone done (%" PRIu32 " frames sent in the last stats period so far)",
+                                 E.frames_out);
+                    }
+                }
                 pack_mono(s_blk_out, out_n, &E.spk, s_raw_out);
                 const size_t bytes = out_n * E.spk.channels * E.spk.subframe;
                 /* Blocks until the driver ring has room: this is the pacing. */

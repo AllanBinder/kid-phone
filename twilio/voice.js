@@ -8,8 +8,9 @@
 // provisioning in the same build as this function) before Twilio hangs up.
 //
 // Language: the phone names its prompt language in the INVITE header
-// X-Kidphone-Lang ("en", "ca", "es"; APP_SIP_LANG_HEADER in
-// src/app_config.h), which Twilio passes as event['SipHeader_X-Kidphone-Lang'].
+// X-Kidphone-Lang ("en", "ca", "es", "fr", "it", "nl", "de", "vi", "pt-br";
+// APP_SIP_LANG_HEADER in src/app_config.h), which Twilio passes as
+// event['SipHeader_X-Kidphone-Lang'].
 // The Dial action URL carries it on as ?lang=, since the action request does
 // not repeat the SIP headers. Missing or unknown = English.
 const LANG_HEADER = 'X-Kidphone-Lang';
@@ -31,6 +32,42 @@ const LANGS = {
     say: 'es-ES',
     noAnswer: 'No han contestado al teléfono.',
     cantCall: 'Lo siento, este teléfono no puede llamar a ese número.',
+  },
+  fr: {
+    asset: '/no-answer-fr.wav',
+    say: 'fr-FR',
+    noAnswer: "Personne n'a répondu au téléphone.",
+    cantCall: 'Désolé, ce téléphone ne peut pas appeler ce numéro.',
+  },
+  it: {
+    asset: '/no-answer-it.wav',
+    say: 'it-IT',
+    noAnswer: 'Non hanno risposto al telefono.',
+    cantCall: 'Mi dispiace, questo telefono non può chiamare questo numero.',
+  },
+  nl: {
+    asset: '/no-answer-nl.wav',
+    say: 'nl-NL',
+    noAnswer: 'Ze hebben de telefoon niet opgenomen.',
+    cantCall: 'Sorry, deze telefoon kan dit nummer niet bellen.',
+  },
+  de: {
+    asset: '/no-answer-de.wav',
+    say: 'de-DE',
+    noAnswer: 'Sie sind nicht ans Telefon gegangen.',
+    cantCall: 'Entschuldigung, dieses Telefon kann diese Nummer nicht anrufen.',
+  },
+  vi: {
+    asset: '/no-answer-vi.wav',
+    say: 'vi-VN',
+    noAnswer: 'Không ai nghe máy cả.',
+    cantCall: 'Xin lỗi, điện thoại này không gọi được số này.',
+  },
+  'pt-br': {
+    asset: '/no-answer-pt-br.wav',
+    say: 'pt-BR',
+    noAnswer: 'Ninguém atendeu o telefone.',
+    cantCall: 'Desculpe, este telefone não pode ligar para esse número.',
   },
 };
 // Silence after the clip, so the phone sees the call last longer than

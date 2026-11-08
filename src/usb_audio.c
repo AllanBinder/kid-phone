@@ -7,6 +7,7 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "freertos/queue.h"
+#include "nvs.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "usb/usb_host.h"
@@ -16,11 +17,27 @@
 
 static const char *TAG = "usb_audio";
 
-/* USB host FIFO split, in 4-byte lines (200 total on the ESP32-S3). */
-#define FIFO_NPTX_LINES 16
-#define FIFO_PTX_LINES  96
-#define FIFO_RX_LINES   88
-#define PERIODIC_OUT_MPS_LIMIT (FIFO_PTX_LINES * 4)
+/* USB host FIFO split, in 4-byte lines (200 total on the ESP32-S3).
+ * Layout 0 is the original split; layout 1 (Advanced > Handset
+ * troubleshooting) gives the earpiece more room at the mic's expense
+ * (RX 56 lines still holds a 192 B mic packet plus status words). */
+typedef struct {
+    uint16_t nptx, ptx, rx;
+} fifo_layout_t;
+static const fifo_layout_t k_layouts[HS_LAYOUT_COUNT] = {
+    {16, 96, 88},
+    {16, 128, 56},
+};
+#define PERIODIC_OUT_MPS_LIMIT (k_layouts[s_hs_layout].ptx * 4)
+
+/* Handset troubleshooting settings, read from NVS once at start. */
+#define HS_NVS_NS "kidphone"
+static uint8_t s_hs_layout;
+static uint8_t s_hs_flags;
+
+/* Last handset seen, for the setup page. */
+static char s_hs_name[UAC_STR_DESC_MAX_LENGTH + 1];
+static uint16_t s_hs_vid, s_hs_pid;
 
 /* Rates in order of preference. All are integer multiples of 8 kHz, so the
  * telephone path (mode B) can use a plain integer decimator. */
@@ -297,6 +314,10 @@ static void open_stream(uint8_t addr, uint8_t iface_num, bool is_mic)
 {
     const char *what = is_mic ? "MIC (RX, device->host)" : "EARPIECE (TX, host->device)";
     ESP_LOGI(TAG, "==== UAC interface found: %s, usb addr %u, interface %u ====", what, addr, iface_num);
+    if (is_mic && (s_hs_flags & HS_FLAG_MIC_OFF)) {
+        ESP_LOGW(TAG, "  mic left off (Handset troubleshooting: speaker only test)");
+        return;
+    }
 
     /* Driver ring sized in blocks of 48 kHz stereo 16-bit (the likely
      * format); the exact format is not known until the alt settings are read.
@@ -315,14 +336,15 @@ static void open_stream(uint8_t addr, uint8_t iface_num, bool is_mic)
         clamp_earpiece_mps(addr);
     }
     uac_host_device_handle_t h = NULL;
-#if APP_USB_DEBUG
+    const bool verbose = APP_USB_DEBUG || (s_hs_flags & HS_FLAG_VERBOSE);
     /* The driver logs the volume range at debug level during open. */
-    esp_log_level_set("uac-host", ESP_LOG_DEBUG);
-#endif
+    if (verbose) {
+        esp_log_level_set("uac-host", ESP_LOG_DEBUG);
+    }
     esp_err_t err = uac_host_device_open(&cfg, &h);
-#if APP_USB_DEBUG
-    esp_log_level_set("uac-host", ESP_LOG_INFO);
-#endif
+    if (verbose && !(s_hs_flags & HS_FLAG_VERBOSE)) {
+        esp_log_level_set("uac-host", ESP_LOG_INFO);
+    }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "  open failed: %s", esp_err_to_name(err));
         return;
@@ -336,6 +358,12 @@ static void open_stream(uint8_t addr, uint8_t iface_num, bool is_mic)
         wstr_to_ascii(info.iSerialNumber, ser, sizeof(ser));
         ESP_LOGI(TAG, "  device: VID:PID %04x:%04x, manufacturer \"%s\", product \"%s\", serial \"%s\"",
                  info.VID, info.PID, man, prod, ser);
+        if (usb_audio_lock(portMAX_DELAY)) {
+            strlcpy(s_hs_name, prod, sizeof(s_hs_name));
+            s_hs_vid = info.VID;
+            s_hs_pid = info.PID;
+            usb_audio_unlock();
+        }
         ESP_LOGI(TAG, "  %u alternate setting(s) with audio:", info.iface_alt_num);
         for (uint8_t alt = 1; alt <= info.iface_alt_num; alt++) {
             uac_host_dev_alt_param_t p;
@@ -381,9 +409,13 @@ static void open_stream(uint8_t addr, uint8_t iface_num, bool is_mic)
 
     /* Controls only work once the stream is active. */
     uint8_t want = is_mic ? APP_MIC_VOLUME_PCT : APP_SPK_VOLUME_PCT;
-    esp_err_t rv = uac_host_device_set_volume(h, want);
-    esp_err_t rm = uac_host_device_set_mute(h, false);
-    ESP_LOGI(TAG, "  set volume %u%%: %s, unmute: %s", want, esp_err_to_name(rv), esp_err_to_name(rm));
+    if (!is_mic && (s_hs_flags & HS_FLAG_KEEP_VOL)) {
+        ESP_LOGW(TAG, "  earpiece volume and mute left as the handset set them (Handset troubleshooting)");
+    } else {
+        esp_err_t rv = uac_host_device_set_volume(h, want);
+        esp_err_t rm = uac_host_device_set_mute(h, false);
+        ESP_LOGI(TAG, "  set volume %u%%: %s, unmute: %s", want, esp_err_to_name(rv), esp_err_to_name(rm));
+    }
     log_controls(h, is_mic ? "mic" : "earpiece");
 
     fmt.handle = h;
@@ -464,9 +496,9 @@ static void usb_lib_task(void *arg)
          * RX 88 lines = 344 B IN MPS (mic), PTX 96 = 384 B (earpiece),
          * NPTX 16 = 64 B (control). Bigger earpiece MPS: clamp_earpiece_mps(). */
         .fifo_settings_custom = {
-            .nptx_fifo_lines = FIFO_NPTX_LINES,
-            .ptx_fifo_lines = FIFO_PTX_LINES,
-            .rx_fifo_lines = FIFO_RX_LINES,
+            .nptx_fifo_lines = k_layouts[s_hs_layout].nptx,
+            .ptx_fifo_lines = k_layouts[s_hs_layout].ptx,
+            .rx_fifo_lines = k_layouts[s_hs_layout].rx,
         },
     };
 #if APP_USB_DEBUG
@@ -477,7 +509,12 @@ static void usb_lib_task(void *arg)
     esp_log_level_set("USB HOST", ESP_LOG_DEBUG);
 #endif
     ESP_ERROR_CHECK(usb_host_install(&host_cfg));
-    ESP_LOGI(TAG, "USB host installed (native port, GPIO 19/20)");
+    ESP_LOGI(TAG, "USB host installed (native port, GPIO 19/20), FIFO layout %u: RX %u, PTX %u, NPTX %u lines",
+             s_hs_layout, k_layouts[s_hs_layout].rx, k_layouts[s_hs_layout].ptx, k_layouts[s_hs_layout].nptx);
+    if (s_hs_flags & HS_FLAG_VERBOSE) {
+        esp_log_level_set("uac-host", ESP_LOG_DEBUG);
+        esp_log_level_set("USBH", ESP_LOG_DEBUG);
+    }
 #if APP_USB_DEBUG
     xTaskCreate(port_probe_task, "port_probe", 3072, NULL, 2, NULL);
 #endif
@@ -538,8 +575,70 @@ static void control_task(void *arg)
     }
 }
 
+static void hs_load(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(HS_NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        uint8_t v;
+        if (nvs_get_u8(h, "hs_layout", &v) == ESP_OK && v < HS_LAYOUT_COUNT) {
+            s_hs_layout = v;
+        }
+        if (nvs_get_u8(h, "hs_flags", &v) == ESP_OK) {
+            s_hs_flags = v & HS_FLAG_ALL;
+        }
+        nvs_close(h);
+    }
+    if (s_hs_layout || s_hs_flags) {
+        ESP_LOGW(TAG, "handset troubleshooting: FIFO layout %u%s%s%s", s_hs_layout,
+                 (s_hs_flags & HS_FLAG_MIC_OFF) ? ", mic off" : "",
+                 (s_hs_flags & HS_FLAG_KEEP_VOL) ? ", earpiece volume untouched" : "",
+                 (s_hs_flags & HS_FLAG_VERBOSE) ? ", verbose USB log" : "");
+    }
+}
+
+void usb_audio_hs_get(uint8_t *layout, uint8_t *flags)
+{
+    *layout = s_hs_layout;
+    *flags = s_hs_flags;
+}
+
+esp_err_t usb_audio_hs_save(uint8_t layout, uint8_t flags)
+{
+    if (layout >= HS_LAYOUT_COUNT) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(HS_NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_u8(h, "hs_layout", layout);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(h, "hs_flags", flags & HS_FLAG_ALL);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    return err;
+}
+
+bool usb_audio_hs_device(char *name, size_t cap, uint16_t *vid, uint16_t *pid)
+{
+    if (!usb_audio_lock(pdMS_TO_TICKS(20))) {
+        return false;
+    }
+    bool have = s_hs_vid || s_hs_pid;
+    strlcpy(name, s_hs_name, cap);
+    *vid = s_hs_vid;
+    *pid = s_hs_pid;
+    usb_audio_unlock();
+    return have;
+}
+
 void usb_audio_start(void)
 {
+    hs_load();
     s_lock = xSemaphoreCreateMutex();
     s_evt_q = xQueueCreate(16, sizeof(evt_t));
     assert(s_lock && s_evt_q);

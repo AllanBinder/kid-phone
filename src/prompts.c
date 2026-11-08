@@ -8,12 +8,15 @@
 
 static const char *TAG = "prompt";
 
-/* src/prompts/<name>.pcm (English) and <name>_ca.pcm / <name>_es.pcm,
+/* src/prompts/<name>.pcm (English) and <name>_<lang>.pcm (_ca, _es, _fr,
+ * _it, _nl, _de, _vi, _pt_br),
  * embedded by src/CMakeLists.txt (EMBED_FILES, no NUL). */
 #define CLIP(name)                                                        \
     extern const uint8_t name##_start[] asm("_binary_" #name "_pcm_start"); \
     extern const uint8_t name##_end[] asm("_binary_" #name "_pcm_end");
-#define CLIPS(name) CLIP(name) CLIP(name##_ca) CLIP(name##_es)
+#define CLIPS(name)                                                         \
+    CLIP(name) CLIP(name##_ca) CLIP(name##_es) CLIP(name##_fr) CLIP(name##_it) \
+    CLIP(name##_nl) CLIP(name##_de) CLIP(name##_vi) CLIP(name##_pt_br)
 CLIPS(time_up)
 CLIPS(unavailable)
 CLIPS(no_answer)
@@ -49,12 +52,24 @@ static const clip_t k_clips[PROMPT_LANG_COUNT][PROMPT_COUNT] = {
     [PROMPT_LANG_EN] = LANG_CLIPS(),
     [PROMPT_LANG_CA] = LANG_CLIPS(_ca),
     [PROMPT_LANG_ES] = LANG_CLIPS(_es),
+    [PROMPT_LANG_FR] = LANG_CLIPS(_fr),
+    [PROMPT_LANG_IT] = LANG_CLIPS(_it),
+    [PROMPT_LANG_NL] = LANG_CLIPS(_nl),
+    [PROMPT_LANG_DE] = LANG_CLIPS(_de),
+    [PROMPT_LANG_VI] = LANG_CLIPS(_vi),
+    [PROMPT_LANG_PT_BR] = LANG_CLIPS(_pt_br),
 };
 
 static const char *const k_lang_codes[PROMPT_LANG_COUNT] = {
     [PROMPT_LANG_EN] = "en",
     [PROMPT_LANG_CA] = "ca",
     [PROMPT_LANG_ES] = "es",
+    [PROMPT_LANG_FR] = "fr",
+    [PROMPT_LANG_IT] = "it",
+    [PROMPT_LANG_NL] = "nl",
+    [PROMPT_LANG_DE] = "de",
+    [PROMPT_LANG_VI] = "vi",
+    [PROMPT_LANG_PT_BR] = "pt-br",
 };
 
 /* Set by the setup server or at boot, read by the audio task when a prompt

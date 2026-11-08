@@ -14,10 +14,10 @@
  *      another list mapped on the domain holds the same username (Twilio may
  *      then check the wrong password and answer 403).
  *   5. Serverless service "kid-phone", environment "prod", function "voice"
- *      and assets "no-answer", "no-answer-ca", "no-answer-es": upload
- *      twilio/voice.js (embedded at build time) as /voice (protected) and
- *      twilio/no_answer*.wav as /no-answer.wav, /no-answer-ca.wav,
- *      /no-answer-es.wav (public, the "They didn't answer the phone." clip
+ *      and assets "no-answer" and "no-answer-<lang>" (ca, es, fr, it, nl, de,
+ *      vi, pt-br): upload twilio/voice.js (embedded at build time) as /voice
+ *      (protected) and twilio/no_answer*.wav as /no-answer.wav,
+ *      /no-answer-<lang>.wav (public, the "They didn't answer the phone." clip
  *      voice.js plays, in the language the phone's INVITE names), build
  *      them all into one build, wait for it, set CALLER_ID and ALLOWED,
  *      deploy, record APP_TW_PROGRAM_VERSION in NVS
@@ -114,6 +114,12 @@ extern const char voice_js_end[] asm("_binary_voice_js_end");
 WAV(no_answer)
 WAV(no_answer_ca)
 WAV(no_answer_es)
+WAV(no_answer_fr)
+WAV(no_answer_it)
+WAV(no_answer_nl)
+WAV(no_answer_de)
+WAV(no_answer_vi)
+WAV(no_answer_pt_br)
 
 /* The no-answer clip per prompt language: Serverless Asset friendly name,
  * public path (NO_ANSWER_ASSET in twilio/voice.js), upload file name, data.
@@ -128,6 +134,18 @@ static const tw_asset_t k_assets[] = {
      no_answer_ca_wav_end},
     {APP_TW_ASSET_NAME "-es", "/" APP_TW_ASSET_NAME "-es.wav", "no_answer_es.wav", no_answer_es_wav_start,
      no_answer_es_wav_end},
+    {APP_TW_ASSET_NAME "-fr", "/" APP_TW_ASSET_NAME "-fr.wav", "no_answer_fr.wav", no_answer_fr_wav_start,
+     no_answer_fr_wav_end},
+    {APP_TW_ASSET_NAME "-it", "/" APP_TW_ASSET_NAME "-it.wav", "no_answer_it.wav", no_answer_it_wav_start,
+     no_answer_it_wav_end},
+    {APP_TW_ASSET_NAME "-nl", "/" APP_TW_ASSET_NAME "-nl.wav", "no_answer_nl.wav", no_answer_nl_wav_start,
+     no_answer_nl_wav_end},
+    {APP_TW_ASSET_NAME "-de", "/" APP_TW_ASSET_NAME "-de.wav", "no_answer_de.wav", no_answer_de_wav_start,
+     no_answer_de_wav_end},
+    {APP_TW_ASSET_NAME "-vi", "/" APP_TW_ASSET_NAME "-vi.wav", "no_answer_vi.wav", no_answer_vi_wav_start,
+     no_answer_vi_wav_end},
+    {APP_TW_ASSET_NAME "-pt-br", "/" APP_TW_ASSET_NAME "-pt-br.wav", "no_answer_pt_br.wav", no_answer_pt_br_wav_start,
+     no_answer_pt_br_wav_end},
 };
 #define N_ASSETS (sizeof(k_assets) / sizeof(k_assets[0]))
 
@@ -1277,8 +1295,8 @@ static int form_add_versions(prov_t *p, const char *key, const char *param)
  * and asset versions, dependencies and runtime, wait for it, and leave its
  * SID in p->build_sid. Only a new build can be deployed (deploy_build), and
  * copying the live one keeps whatever program the phone was set up with.
- * The fetched build is a few KB (one function and three asset versions);
- * the create form is about 400 bytes, inside p->body. */
+ * The fetched build is a few KB (one function and up to nine asset versions);
+ * the create form is about 600 bytes, inside p->body. */
 static bool rebuild_live(prov_t *p)
 {
     snprintf(p->url, sizeof(p->url), SLS "/%s/Builds/%s", p->svc_sid, p->build_sid);

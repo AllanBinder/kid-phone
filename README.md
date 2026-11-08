@@ -205,6 +205,17 @@ installer page, press **Connect**, and use the WiFi setup (Improv) to add the
 network; the networks already saved are kept. As a last resort, hold BOOT
 for 10 s (factory reset) and set the phone up from step 1.
 
+**Handset troubleshooting** (setup page, **Advanced**): for a handset that
+plugs in but stays silent. It shows the handset's name, USB ID and the
+earpiece and mic formats the phone chose. **Play a test tone** sends a 3 s
+1 kHz tone to the earpiece (idle only). The options below it are saved and
+applied when the phone restarts (**Save and restart**): a USB buffer layout
+(Standard, or a bigger earpiece buffer at the mic's expense), a speaker only
+test (the mic is not opened, so calls are one way), leaving the earpiece
+volume as the handset sets it, and a detailed USB log for the installer
+page's **Logs & Console**. Leave them on Standard and unticked unless
+troubleshooting. A factory reset clears them.
+
 **Starting over (factory reset)**: on the setup page open **Advanced**, type
 `RESET` and press **Factory reset**. Or hold the **BOOT** button on the
 phone's board for 10 seconds (the light blinks amber from 1.5 s on; let go
@@ -274,14 +285,17 @@ has the call program from older phone software. Press **Run setup again**
 once (it needs the Auth Token); changing numbers alone does not update it.
 
 **Voice language** (since 0.7.0): the setup page's **Voice language** card
-picks English (the default), Catalan (Català) or Spanish (Español) for every
+picks English (the default), Catalan (Català), Spanish (Español), French
+(Français), Italian (Italiano), Dutch (Nederlands), German (Deutsch),
+Vietnamese (Tiếng Việt) or Brazilian Portuguese (Português) for every
 sentence in the table above. **Save** applies it at once, no token needed;
 **Play a sample** says "They didn't answer the phone." on the handset in the
 saved language (handset plugged in, phone idle). The phone tells Twilio its
 language on every call, so Twilio's own no-answer sentence follows a change
-right away too, once the account has the 0.7.0 call program (**Run setup
-again** once after updating from 0.6.x or older; until then Twilio keeps
-saying it in English).
+right away too, once the account has the call program for that language
+(**Run setup again** once after updating: from 0.6.x or older for Catalan
+and Spanish, from 0.7.x or older for the 0.8.0 languages; until then Twilio
+says it in English).
 
 Contact lights: on = can be called now, off = not set up, outside their
 hours, bedtime (all off), or the phone itself cannot call (no WiFi or Twilio
@@ -381,12 +395,13 @@ Ctrl-C quits the monitor. After editing `sdkconfig.defaults`, delete
 `sdkconfig.esp32s3` so the change is picked up.
 
 Partitions (`partitions.csv`): `nvs` 0x9000 (24 KB), `phy_init` 0xf000,
-one `factory` app at 0x10000. The app partition is 0x7F0000 (about 8 MB,
-ending at the 8 MB mark so an N8 board still boots) since 0.7.0, up from
-3 MB, because each prompt language adds about 1 MB of PCM; the app is about
-4.7 MB with three languages. `nvs` and `phy_init` did not move,
-so `pio run -t upload` from 0.6.x keeps every setting (it writes the new
-partition table with the bootloader and app). No OTA partitions.
+one `factory` app at 0x10000. The app partition is 0xFF0000 (about 16 MB,
+the rest of the N16R8's flash) since 0.8.0, up from 0x7F0000 in 0.7.0 and
+3 MB before that, because each prompt language adds about 1 MB of PCM.
+From 0.8.0 the firmware no longer fits an N8 (8 MB flash) board. `nvs` and
+`phy_init` did not move, so `pio run -t upload` from 0.6.x or 0.7.x keeps
+every setting (it writes the new partition table with the bootloader and
+app). No OTA partitions.
 
 `sdkconfig.defaults` adds, among others, `CONFIG_LWIP_MAX_SOCKETS=16`,
 `CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y` and `CONFIG_LWIP_SNTP_MAX_SERVERS=2`
@@ -426,7 +441,7 @@ All runtime config lives in NVS, namespace `kidphone` (`src/config_store.c`):
 | `smtp_user`, `smtp_pass` | str | same; login (a full email address, also the sender) and app password. The password is never returned by any endpoint and never logged |
 | `smtp_from`, `kid_name` | str | same; sender name on the email (missing = "Kid Phone") and the child's name for the subject (missing = none); erased when empty |
 | `sec_max_s`, `sec_cap_hr`, `sec_bed` | u16, u8, u8 | same; longest secret 10..120 s (missing = 60), secrets per hour 1..20 (missing = 5), 1 = allowed at bedtime (missing = no; erased when off) |
-| `lang` | u8 | `POST /api/settings`; language of the spoken prompts (`prompt_lang_t`): 1 = Catalan, 2 = Spanish. Missing (also every phone before 0.7.0) = English; erased when set back to English |
+| `lang` | u8 | `POST /api/settings`; language of the spoken prompts (`prompt_lang_t`): 1 = Catalan, 2 = Spanish, 3 = French, 4 = Italian, 5 = Dutch, 6 = German, 7 = Vietnamese, 8 = Brazilian Portuguese (0.8.0). Missing (also every phone before 0.7.0) = English; erased when set back to English |
 | `emerg_taps` | u8 | `POST /api/settings`; emergency override, quick presses of one button that call past bedtime and the schedule, 5..50. Missing (also every phone before 0.7.3) or out of range = off; erased when turned off |
 
 Schedule blob (`sched_blob_t` in `config_store.c`, packed, little endian):
@@ -562,6 +577,7 @@ phone only has the station interface, so it is only reachable on the home LAN.
 | `POST /api/provision` | `{account_sid, auth_token, contacts, full}` (202 `{ok, message, run}`). Already set up with its own login, same account, `full` not true: numbers-only update. Otherwise the full setup. `account_sid` may be omitted once stored. Old `contact_name`/`contact_number` still accepted |
 | `POST /api/settings` | `{max_call_minutes, lang, emergency_taps}`, any may be left out (400 if all are): a whole number 1..120, "en", "ca" or "es", and 0 or null (off) or a whole number 5..50 (400 otherwise; nothing is saved if any is bad). A new `lang` applies to the next prompt and the next call's INVITE, a new `emergency_taps` to the next press. No token |
 | `POST /api/prompt/sample` | `{}`: play "They didn't answer the phone." on the handset in the saved language. 409 without a handset, during a call or while a secret is going |
+| `POST /api/handset` | `{"action": "tone"}`: 3 s test tone on the earpiece (409 without a handset or when busy). `{"layout": 0\|1, "mic_off", "keep_volume", "verbose"}`: save the handset troubleshooting options and restart in 1 s |
 | `POST /api/secret` | `{smtp_host, smtp_port, smtp_security, smtp_user, smtp_pass, from_name, kid_name, max_seconds, hourly_cap, bedtime_ok}`: secret message email account and limits. `smtp_pass` missing or empty keeps the saved one (spaces are removed, as app passwords are shown in groups), `clear_password: true` erases it. 400 on a bad host, port, login (must be an email address) or out-of-range limit. Device only, no token |
 | `POST /api/secret/test` | `{}`: a text-only test email to the login's own address with the saved settings; 202, the outcome in `/api/status` `secret.test` (409 if not set up, no WiFi, or an email is already being sent) |
 | `POST /api/bedtime` | `{enabled, start, end, tz, tz_name}`: times as "HH:MM" or minutes of the day (home time), `tz` a POSIX TZ rule. 400 if a time is missing or out of range, if on with equal times, or if `tz` does not parse (required when on). Device only, no token |
@@ -905,11 +921,13 @@ at idle as above. Mode C is the only way to hear the dial tone by default.
 
 ### Spoken prompts
 
-The phone speaks nine short sentences (table in Setup), in English, Catalan
-or Spanish (NVS `lang`, the setup page's **Voice language** card). They are
+The phone speaks nine short sentences (table in Setup), in English, Catalan,
+Spanish, French, Italian, Dutch, German, Vietnamese or Brazilian Portuguese
+(NVS `lang`, the setup page's **Voice language** card). They are
 made offline by `scripts/gen_prompts.py` and committed as raw 16 kHz mono
 16-bit little-endian PCM in `src/prompts/`: `<name>.pcm` English,
-`<name>_ca.pcm` Catalan, `<name>_es.pcm` Spanish (about 1 MB per language,
+`<name>_<lang>.pcm` for the others (`_ca`, `_es`, `_fr`, `_it`, `_nl`,
+`_de`, `_vi`, `_pt_br`; about 1 MB per language,
 embedded with `EMBED_FILES` in `src/CMakeLists.txt` and
 `board_build.embed_files` in `platformio.ini`; the two lists must match). The
 names stay flat so every embedded symbol is unique
@@ -931,6 +949,12 @@ can be redistributed with this repo):
 |---|---|---|---|
 | English | [Piper](https://github.com/rhasspy/piper) `en_US-ljspeech-high` | LJ Speech, public domain | public domain |
 | Spanish | Piper `es_ES-carlfm-x_low` | [carlfm01 Spanish speech](https://github.com/carlfm01/my-speech-datasets), public domain | public domain |
+| French | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) (Apache-2.0), voice `ff_siwis` | SIWIS French speech synthesis database, CC BY 4.0 | CC BY 4.0 |
+| Italian | Piper `it_IT-serena-medium` | synthetic dataset, CC BY 4.0 (model card) | CC BY 4.0 |
+| Dutch | Piper `nl_BE-rdh-medium` (Flemish accent, male) | [r-dh/dutch-vl-tts](https://github.com/r-dh/dutch-vl-tts), CC0 | public domain |
+| German | Piper `de_DE-mls-medium`, speaker 130 | Multilingual LibriSpeech (OpenSLR 94), CC BY 4.0 | CC BY 4.0 |
+| Vietnamese | [VieNeu-TTS v3 Turbo](https://huggingface.co/pnnbao-ump/VieNeu-TTS-v3-Turbo) (Apache-2.0) with the MOSS audio tokenizer (Apache-2.0), preset voice "Mỹ Duyên" | per the model card; training data provenance not independently verified | Apache-2.0 (model terms) |
+| Brazilian Portuguese | Kokoro-82M, voice `pf_dora` | per the Kokoro model card (permissive and synthetic data) | Apache-2.0 (model terms) |
 | Catalan | [Matxa-TTS v2 central Catalan](https://huggingface.co/BSC-LT/matxa-tts-v2-ca-central-graphemes) (GPL-3.0) with the WaveNext vocoder (Apache-2.0), speaker "ona" | Catalan Common Voice (CC0), then Festcat (CC BY-SA 3.0 ES) and OpenSLR 69 (CC BY-SA 4.0) | CC BY-SA 3.0 ES |
 
 The Catalan clips (`src/prompts/*_ca.pcm`, `twilio/no_answer_ca.wav`) use
@@ -940,8 +964,13 @@ voice from the Festcat corpus, Universitat Politecnica de Catalunya
 Supercomputing Center, Projecte Aina and ILENIA. Reuse them under the same
 license, with that credit.
 
-Why these voices: the higher-quality Piper Catalan and Spanish voices are
-fine-tuned from `lessac` (Blizzard research license), and the Aina
+The CC BY 4.0 clips (`_fr`, `_it`, `_de`) need credit when reused: SIWIS
+database (Honnet et al., Idiap) for French, the Serena voice card for
+Italian, Multilingual LibriSpeech (Pratap et al., OpenSLR 94) for German.
+
+Why these voices: the higher-quality Piper Catalan and Spanish voices, and
+most Piper French, Dutch and German voices, are fine-tuned from `lessac`
+(Blizzard research license) or `ryan`, and the Aina
 multi-accent Catalan voices (LaFrescat) and the alVoCat vocoder are
 non-commercial only. Do not switch to a voice fine-tuned from `lessac` or
 trained on non-commercial data without checking its model card first. The
@@ -952,7 +981,7 @@ Levels: active speech at about -23 dBFS RMS with peaks held at or below
 -7 dBFS, a little under the dial tone (-20 dBFS RMS, -14 dBFS peak) and
 about level with the status tones. The earpiece runs at 100 % volume against
 a child's ear, so keep it there. Speech is slowed a little (length scale
-1.2 English, 1.15 Spanish, 1.1 Catalan) and high-passed at 120 Hz for the small earpiece.
+1.2 English, 1.15 Spanish, 1.1 most others) and high-passed at 120 Hz for the small earpiece.
 
 To change a sentence, edit its language's `prompts` in `LANGS` in the script
 and run it with only the clips that changed (TTS output varies slightly between runs, so the others
@@ -962,14 +991,23 @@ would change too; listen to the result):
 python3.12 -m venv ~/.venv-piper && ~/.venv-piper/bin/pip install piper-tts
 ~/.venv-piper/bin/python scripts/gen_prompts.py no_answer   # needs ffmpeg on PATH; no names = all
 ~/.venv-piper/bin/python scripts/gen_prompts.py --lang ca secret_start
+~/.venv-kokoro/bin/python scripts/gen_prompts.py --lang fr      # fr, pt-br: pip install kokoro
+~/.venv-vieneu/bin/python scripts/gen_prompts.py --lang vi      # vi: pip install vieneu
 ```
+
+The German MLS voice babbles on prompts under seven words, even with low
+noise settings, so the script speaks those after a carrier phrase and cuts
+the carrier off at the comma pause (`synth_piper_carrier`). Takes vary:
+Whisper-check or listen, and rerun a stem whose first word is clipped or
+that still has a carrier word.
 
 Another language: add its clips with `scripts/gen_prompts.py`, a
 `PROMPT_LANG_*` value (append, the number is stored in NVS), a table row in
 `prompts.c`, the files to both embed lists, an entry in `LANGS` in
 `twilio/voice.js` and `k_assets` in `twilio_provision.c`, an option on the
 setup page, and a bump of `APP_TW_PROGRAM_VERSION`. Each language costs about
-1 MB of the 8 MB app partition, so about three more fit.
+1 MB of the app partition, which already fills the 16 MB flash: see the
+build's size report before adding one.
 
 `no_answer` also writes `twilio/no_answer.wav` (and `no_answer_ca.wav`,
 `no_answer_es.wav` for the other languages), the same mastered clip as
@@ -1243,7 +1281,7 @@ src/rtp.c/.h          PCMU RTP sender/receiver tasks, jitter buffer, stream buff
 src/usb_audio.c/.h    USB host + UAC driver: hot-plug, descriptor log, format choice, volume/mute
 src/audio_engine.c/.h audio task (core 1): mic jitter ring, modes A-D and CALL, prompt playback, emergency tone, stats
 src/prompts.c/.h      spoken prompt tables (one per language), language setting and play requests (clips embedded from src/prompts/)
-src/prompts/*.pcm     the spoken prompts, 16 kHz mono s16le, made by scripts/gen_prompts.py (<name>.pcm English, <name>_ca.pcm, <name>_es.pcm)
+src/prompts/*.pcm     the spoken prompts, 16 kHz mono s16le, made by scripts/gen_prompts.py (<name>.pcm English, <name>_<lang>.pcm the others)
 src/app_config.h      all tunables (assignable and default button and LED GPIOs, block size, volumes, buffers, SIP/RTP ports and timers)
 src/secrets.h         optional developer override (gitignored; template secrets.h.example)
 twilio/voice.js       Twilio Function behind the SIP Domain voice URL (allowlist, echo test, no-answer sentence in the INVITE's language); embedded and uploaded by provisioning

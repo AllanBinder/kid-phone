@@ -297,7 +297,8 @@
  * "no-answer-<lang>" at /no-answer-<lang>.wav. The paths must match
  * NO_ANSWER_ASSET in twilio/voice.js. */
 #define APP_TW_ASSET_NAME       "no-answer"
-/* SIP header with the prompt language ("en", "ca", "es") on every INVITE.
+/* SIP header with the prompt language ("en", "ca", "es", "fr", "it", "nl",
+ * "de", "vi", "pt-br") on every INVITE.
  * Twilio hands X- headers to the Function as event["SipHeader_<name>"]; must
  * match LANG_HEADER in twilio/voice.js. */
 #define APP_SIP_LANG_HEADER     "X-Kidphone-Lang"
@@ -308,8 +309,11 @@
  * build that is live and do not change it.
  *   2  (2026-10-18): Dial action, spoken "They didn't answer the phone."
  *   3  (2026-11-02, 0.7.0): no-answer clip and say() lines in the phone's
- *      language (X-Kidphone-Lang header, no-answer-ca / no-answer-es assets) */
-#define APP_TW_PROGRAM_VERSION  3
+ *      language (X-Kidphone-Lang header, no-answer-ca / no-answer-es assets)
+ *   4  (2026-11-07, 0.8.0): French, Italian, Dutch, German, Vietnamese and
+ *      Brazilian Portuguese (no-answer-fr ... no-answer-pt-br assets, say()
+ *      lines in those languages) */
+#define APP_TW_PROGRAM_VERSION  4
 
 /* ---------------------------------------------------------------------------
  * Secret messages: a recording from the handset mic, emailed by the phone

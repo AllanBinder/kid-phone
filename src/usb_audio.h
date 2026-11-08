@@ -9,9 +9,11 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "freertos/FreeRTOS.h"
+#include "esp_err.h"
 #include "usb/uac_host.h"
 
 typedef struct {
@@ -41,3 +43,17 @@ ua_state_t *usb_audio_state(void);
 
 /* True while the handset's earpiece or mic stream is running. */
 bool usb_audio_handset_connected(void);
+
+/* Handset troubleshooting (setup page, Advanced). Saved in NVS, applied at
+ * the next start: the FIFO split is fixed when the USB host is installed. */
+#define HS_LAYOUT_COUNT  2     /* 0 = standard, 1 = bigger earpiece FIFO */
+#define HS_FLAG_MIC_OFF  0x01  /* do not open the mic (speaker only test) */
+#define HS_FLAG_KEEP_VOL 0x02  /* leave the earpiece volume/mute alone */
+#define HS_FLAG_VERBOSE  0x04  /* USB host/UAC debug logging */
+#define HS_FLAG_ALL      0x07
+
+void usb_audio_hs_get(uint8_t *layout, uint8_t *flags);
+esp_err_t usb_audio_hs_save(uint8_t layout, uint8_t flags);
+
+/* Product name and VID:PID of the last handset seen; false if none yet. */
+bool usb_audio_hs_device(char *name, size_t cap, uint16_t *vid, uint16_t *pid);

@@ -175,6 +175,12 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
       <option value="en">English</option>
       <option value="ca" lang="ca">Català</option>
       <option value="es" lang="es">Español</option>
+      <option value="fr" lang="fr">Français</option>
+      <option value="it" lang="it">Italiano</option>
+      <option value="nl" lang="nl">Nederlands</option>
+      <option value="de" lang="de">Deutsch</option>
+      <option value="vi" lang="vi">Tiếng Việt</option>
+      <option value="pt-br" lang="pt-BR">Português (Brasil)</option>
     </select>
     <p class="hint">Every sentence the phone says ("They didn't answer the phone", "Time's up", bedtime, secrets) uses this language. The sentence Twilio plays when nobody answers follows it too (after a phone software update, press <b>Run setup again</b> once). <b>Play a sample</b> says one sentence on the handset.</p>
     <button type="button" id="b-lang">Save</button>
@@ -334,6 +340,21 @@ footer { color: var(--muted); font-size: 14px; text-align: center; margin-top: 2
   <section class="card">
     <details id="adv">
       <summary>Advanced</summary>
+      <h3>Handset troubleshooting</h3>
+      <p>For a handset that plugs in but stays silent. Only change these if asked to while troubleshooting; the standard settings work for most handsets.</p>
+      <p class="hint" id="hs-info">No handset seen yet.</p>
+      <button type="button" id="b-hs-tone">Play a test tone</button>
+      <p class="hint" id="hs-tone-msg"></p>
+      <label for="hs-layout">USB buffer layout</label>
+      <select id="hs-layout" style="max-width: 360px">
+        <option value="0">Standard</option>
+        <option value="1">Bigger earpiece buffer (smaller mic buffer)</option>
+      </select>
+      <label class="toggle"><input type="checkbox" id="hs-micoff"> Speaker only test (leave the mic off; calls are one way)</label>
+      <label class="toggle"><input type="checkbox" id="hs-keepvol"> Leave the earpiece volume as the handset sets it</label>
+      <label class="toggle"><input type="checkbox" id="hs-verbose"> Detailed USB log (for the installer page's Logs &amp; Console)</label>
+      <button type="button" id="b-hs-save">Save and restart</button>
+      <p class="hint" id="hs-msg"></p>
       <h3>Factory reset</h3>
       <p>Erases everything on the phone: the WiFi, the Twilio connection, the people on each button, their times, the call length, bedtime and the button pins (back to buttons on GPIO 4-7 and lights on 15-18). Nothing in your Twilio account is deleted.</p>
       <p>Afterwards the phone is off every saved WiFi network, so this page stops working. Set it up again from the start: plug its COM port into a computer and open the installer page.</p>
@@ -828,6 +849,7 @@ function render() {
   show("old-login", t.provisioned && !t.login_current);
   show("old-program", t.provisioned && t.login_current && t.program_current === false);
   $("fw").textContent = "Firmware " + st.firmware;
+  renderHandset(st.handset_info || {});
   const set = st.settings || {};
   const mm = $("maxmin");
   if (set.max_call_minutes && document.activeElement !== mm && !mmDirty) mm.value = set.max_call_minutes;
@@ -1571,6 +1593,42 @@ $("b-tw-cancel").addEventListener("click", () => {
 });
 $("b-rerun").addEventListener("click", () => openTwilio("full",
   "Setup runs again with the people above. It gives the phone a fresh login, which fixes most call problems."));
+
+/* ---------- handset troubleshooting ---------- */
+
+let hsDirty = false;
+function renderHandset(h) {
+  const parts = [];
+  if (h.name || h.id) parts.push((h.name || "Handset") + (h.id ? " (" + h.id + ")" : ""));
+  parts.push("earpiece: " + (h.earpiece || "not running"));
+  parts.push("mic: " + (h.mic || (h.mic_off ? "off (speaker only test)" : "not running")));
+  $("hs-info").textContent = parts.join(", ");
+  if (hsDirty || h.layout === undefined) return;
+  $("hs-layout").value = String(h.layout);
+  $("hs-micoff").checked = !!h.mic_off;
+  $("hs-keepvol").checked = !!h.keep_volume;
+  $("hs-verbose").checked = !!h.verbose;
+}
+["hs-layout", "hs-micoff", "hs-keepvol", "hs-verbose"].forEach(id =>
+  $(id).addEventListener("change", () => { hsDirty = true; $("hs-msg").textContent = ""; }));
+$("b-hs-tone").addEventListener("click", async () => {
+  $("b-hs-tone").disabled = true;
+  let r;
+  try { r = await api("/api/handset", {action: "tone"}); } catch (e) { r = {ok: false, j: {}}; }
+  $("hs-tone-msg").textContent = r.ok ? "Playing a 3 second tone. Hold the handset to your ear." : (r.j.error || "Could not play. Try again.");
+  setTimeout(() => { $("b-hs-tone").disabled = false; }, 3000);
+});
+$("b-hs-save").addEventListener("click", async () => {
+  $("b-hs-save").disabled = true;
+  let r;
+  try {
+    r = await api("/api/handset", {layout: Number($("hs-layout").value), mic_off: $("hs-micoff").checked,
+      keep_volume: $("hs-keepvol").checked, verbose: $("hs-verbose").checked});
+  } catch (e) { r = {ok: false, j: {}}; }
+  $("hs-msg").textContent = r.ok ? (r.j.message || "Saved. The phone restarts now.") : (r.j.error || "Could not save. Try again.");
+  if (r.ok) hsDirty = false;
+  setTimeout(() => { $("b-hs-save").disabled = false; }, 3000);
+});
 
 $("reset-word").addEventListener("input", () => {
   $("b-reset").disabled = $("reset-word").value.trim() !== "RESET";
