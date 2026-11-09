@@ -1244,6 +1244,20 @@ after the SIP leg is answered, which is why they show up as a short call.
   (the script then reports "already accepts" and does nothing). Read a
   board's flash ID with esptool-js (espressif.github.io/esptool-js) or
   `esptool.py flash_id`.
+- **XMC 0x2070xx flash boot loop (fixed in 0.8.1, 2026-11-09, GitHub #3):**
+  another N16R8 clone flash chip (RDID `20 70 18`) gives the same
+  `XMC flash startup fail` loop. `is_xmc_chip_strict()` only knows mfid
+  0x40/0x41/0x50; `scripts/patch_xmc_bootloader.py` now also accepts mfid
+  0x70 (cpid 0x15 to 0x19), which skips the startup flow.
+- **SPACETOUCH handset (12d1:3a07) earpiece never started (fixed in 0.8.1,
+  2026-11-09, GitHub #1 and #2):** the handset from the guide's parts link.
+  After the mic opened, a log-only GET_CUR mute went to its feature unit,
+  which has no mute control. The chip never answers instead of stalling, the
+  control transfer times out, EP0 never recovers, and the earpiece's
+  SET_INTERFACE then fails ("Unable to set Interface alternate"), so calls
+  were silent although the dashboard said "Plugged in". The read is gone.
+  Never send a GET to a control the descriptor doesn't advertise
+  (`usb_host_uac` 1.5.0 checks the mute map on SET but not on GET).
 - **Number changes failed with HTTP 409 (fixed in 0.7.2, 2026-11-05):**
   after the first setup, every change to a phone number failed with
   "Deploying the call program (HTTP 409, Twilio error 20409) Environment

@@ -144,21 +144,21 @@ static void log_controls(uac_host_device_handle_t h, const char *what)
 {
     int16_t vol_db = 0;
     uint8_t vol_pct = 0;
-    bool mute = false;
     esp_err_t r_db = uac_host_device_get_volume_db(h, &vol_db);
     esp_err_t r_pct = uac_host_device_get_volume(h, &vol_pct);
-    esp_err_t r_mute = uac_host_device_get_mute(h, &mute);
+    /* No GET_CUR mute here (removed in 0.8.1, GitHub issues #1 and #2). It
+     * only fed a log line, and some chips (SPACETOUCH 12d1:3a07) never answer
+     * it on a feature unit without a mute control. usb_host_uac 1.5.0 skips
+     * SET mute when the mute channel map is empty but still sends the GET, so
+     * the control transfer times out, EP0 cannot be recovered, and every later
+     * control request fails: the earpiece then never starts ("Unable to set
+     * Interface alternate"). */
 
     if (r_db == ESP_OK) {
         ESP_LOGI(TAG, "    %s volume control: YES, now %.2f dB (%u%% of driver range)",
                  what, vol_db / 256.0f, r_pct == ESP_OK ? vol_pct : 0);
     } else {
         ESP_LOGI(TAG, "    %s volume control: no (%s)", what, esp_err_to_name(r_db));
-    }
-    if (r_mute == ESP_OK) {
-        ESP_LOGI(TAG, "    %s mute control:   YES, now %s", what, mute ? "MUTED" : "unmuted");
-    } else {
-        ESP_LOGI(TAG, "    %s mute control:   no (%s)", what, esp_err_to_name(r_mute));
     }
 }
 
