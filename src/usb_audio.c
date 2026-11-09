@@ -400,7 +400,19 @@ static void open_stream(uint8_t addr, uint8_t iface_num, bool is_mic)
         .sample_freq = fmt.rate,
         .flags = 0,
     };
-    err = uac_host_device_start(h, &stm);
+    /* Handsets that declare an oversized OUT MPS (e.g. 600) need the host
+     * descriptor clamp above; SET_INTERFACE can still flake once on a busy
+     * bus, especially if the mic stream was already running. Retry a few
+     * times before giving up on the earpiece. */
+    err = ESP_FAIL;
+    for (int try = 1; try <= 3; try++) {
+        err = uac_host_device_start(h, &stm);
+        if (err == ESP_OK) {
+            break;
+        }
+        ESP_LOGW(TAG, "  stream start try %d failed: %s", try, esp_err_to_name(err));
+        vTaskDelay(pdMS_TO_TICKS(50 * try));
+    }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "  stream start failed: %s", esp_err_to_name(err));
         uac_host_device_close(h);
@@ -544,18 +556,56 @@ static void control_task(void *arg)
     ESP_ERROR_CHECK(uac_host_install(&uac_cfg));
     ESP_LOGI(TAG, "UAC class driver installed, waiting for handset (plug it into the native USB port)");
 
+    /* Defer the mic (RX) until after the earpiece (TX) for the same device.
+     * Opening the mic first leaves isoc IN running; on handsets with an
+     * oversized OUT MPS (clamped to the PTX FIFO) the following earpiece
+     * SET_INTERFACE then fails and the earpiece never starts. */
+    bool pending_mic = false;
+    uint8_t pending_mic_addr = 0;
+    uint8_t pending_mic_iface = 0;
+    TickType_t pending_mic_deadline = 0;
+
     evt_t e;
     while (1) {
-        if (xQueueReceive(s_evt_q, &e, portMAX_DELAY) != pdTRUE) {
+        TickType_t wait = portMAX_DELAY;
+        if (pending_mic) {
+            TickType_t now = xTaskGetTickCount();
+            wait = (now >= pending_mic_deadline) ? 0 : (pending_mic_deadline - now);
+        }
+        if (xQueueReceive(s_evt_q, &e, wait) != pdTRUE) {
+            if (pending_mic) {
+                ESP_LOGW(TAG, "earpiece did not appear; opening mic alone");
+                open_stream(pending_mic_addr, pending_mic_iface, true);
+                pending_mic = false;
+            }
             continue;
         }
         if (e.kind == EVT_DRIVER) {
             switch (e.drv.event) {
-            case UAC_HOST_DRIVER_EVENT_RX_CONNECTED:
-                open_stream(e.drv.addr, e.drv.iface_num, true);
+            case UAC_HOST_DRIVER_EVENT_RX_CONNECTED: {
+                bool spk_up = false;
+                if (usb_audio_lock(pdMS_TO_TICKS(50))) {
+                    spk_up = s_state.spk.active;
+                    usb_audio_unlock();
+                }
+                if (spk_up) {
+                    open_stream(e.drv.addr, e.drv.iface_num, true);
+                } else {
+                    pending_mic = true;
+                    pending_mic_addr = e.drv.addr;
+                    pending_mic_iface = e.drv.iface_num;
+                    pending_mic_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(1500);
+                    ESP_LOGI(TAG, "mic interface seen (addr %u iface %u); waiting for earpiece first",
+                             pending_mic_addr, pending_mic_iface);
+                }
                 break;
+            }
             case UAC_HOST_DRIVER_EVENT_TX_CONNECTED:
                 open_stream(e.drv.addr, e.drv.iface_num, false);
+                if (pending_mic && pending_mic_addr == e.drv.addr) {
+                    open_stream(pending_mic_addr, pending_mic_iface, true);
+                    pending_mic = false;
+                }
                 break;
             default:
                 break;
@@ -564,6 +614,7 @@ static void control_task(void *arg)
             switch (e.dev.event) {
             case UAC_HOST_DRIVER_EVENT_DISCONNECTED:
                 close_stream(e.dev.handle);
+                pending_mic = false;
                 break;
             case UAC_HOST_DEVICE_EVENT_TRANSFER_ERROR:
                 ESP_LOGW(TAG, "USB transfer error on %s", e.dev.handle == s_state.mic.handle ? "MIC" : "EARPIECE");
