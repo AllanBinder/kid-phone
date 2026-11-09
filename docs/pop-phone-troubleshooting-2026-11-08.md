@@ -74,3 +74,34 @@ other POP Phone owners need nothing. If none works, next ideas: send
 SET_CUR sample rate to EP 0x03 even though it isn't advertised, open the
 HID interface (hook button), try opening the mic before the earpiece, or
 patch the UAC driver to log per-packet isoc OUT status.
+
+## 2026-11-09: Cody's Windows data (USB Tree Viewer + USBPcap)
+
+- Windows gets a **276-byte** config: IAD; speaker alt 1 = 24-bit and alt 2 = 16-bit,
+  both 44.1/48 kHz, EP 0x03 **synchronous** with SamplingFreq control; no selector unit.
+  The ESP32 got **226 bytes** on 2026-11-07 21:03 (one 24-bit 48 kHz alt, adaptive EP,
+  no SF control, extra selector unit 7, AC header wTotalLength 72 but 79 bytes of units).
+  Device descriptor is the same in both (bcdUSB 1.10, MPS0 64, bcdDevice 0x0029).
+- **The ESP32 has probably already seen the Windows profile.** The 21:48 log is the same
+  boot (uptime 2647 s vs 1031 s) and reports `earpiece 48000Hz/2ch/16b`. Only the
+  276-byte profile has a 16-bit speaker alt, and `pick_format` prefers 16-bit. In that
+  profile the UAC driver already sends SET_CUR SAMPLING_FREQ 48000 to EP 0x03
+  (`uac_host_interface_resume`, same bytes Windows sends). If the earpiece was still
+  silent then, profile choice and the SF request are not the fix. Needs confirming:
+  ask Cody for the plug-in part of a log showing the 16b case (wTotalLength, "Set EP 3
+  frequency") and whether that session was silent too.
+- The pcap is incomplete for playback: no isochronous packets at all and no
+  SET_INTERFACE alt 1/2 on interface 1. It ends 1.2 s after the SET_CUR. USBPcap also
+  cannot see the hub's pre-address enumeration, so Windows' 64-byte first read is known
+  Windows behavior, not something this capture shows. The 9-then-276 config reads in it
+  come from the client driver after enumeration.
+- HID report descriptor (65 B) is input-only: consumer keys, Hook Switch (0x0B/0x20),
+  Phone Mute (0x0B/0x2F). No output reports, so there is no host "off-hook" or ring
+  signal that could gate the speaker. Opening HID is cheap but unlikely to matter.
+- Windows reads mic volume on FU 5 ch0 fine. The ESP driver's "mic volume not supported"
+  is likely because the 226 profile routes FU5 -> SU7 -> OT6 and the driver doesn't
+  follow the selector. Harmless for now.
+- ENUM_SHORT_DESC_REQ_LEN experiment (IDF 5.5.3 `components/usb/enum.c`): one constant
+  drives both short reads and the exact-length checks (`expect_num_bytes`). A 64-byte
+  device read gets a short 18-byte reply, so that check must be relaxed too. Medium
+  effort; do it only if the 16b session turns out to have been audible.
